@@ -396,6 +396,65 @@ class ScannersTest extends TestCase
         $this->deleteDirectoryRecursively($tempDir);
     }
 
+    public function test_idor_scanner_accepts_form_request_with_authorization_logic(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_formreq_auth_' . uniqid();
+        mkdir($tempDir . '/app/Http/Controllers', 0777, true);
+        mkdir($tempDir . '/app/Http/Requests', 0777, true);
+
+        $requestFile = $tempDir . '/app/Http/Requests/UpdateArtikelRequest.php';
+        file_put_contents($requestFile, "<?php\nnamespace App\Http\Requests;\nclass UpdateArtikelRequest {\npublic function authorize(): bool {\nreturn \$this->user()->can('update', \$this->route('artikel'));\n}\n}\n");
+
+        $controllerFile = $tempDir . '/app/Http/Controllers/ArtikelController.php';
+        file_put_contents($controllerFile, "<?php\nnamespace App\Http\Controllers;\nuse App\Http\Requests\UpdateArtikelRequest;\nclass ArtikelController {\npublic function update(UpdateArtikelRequest \$request, Artikel \$artikel) {\n// update data\n}\n}\n");
+
+        $scanner = new \Waskita\Security\Scanners\IdorScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Method with FormRequest containing authorize logic should not be flagged as IDOR.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_idor_scanner_flags_form_request_returning_true_without_checks(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_formreq_true_' . uniqid();
+        mkdir($tempDir . '/app/Http/Controllers', 0777, true);
+        mkdir($tempDir . '/app/Http/Requests', 0777, true);
+
+        $requestFile = $tempDir . '/app/Http/Requests/UpdateBukuRequest.php';
+        file_put_contents($requestFile, "<?php\nnamespace App\Http\Requests;\nclass UpdateBukuRequest {\npublic function authorize(): bool {\nreturn true;\n}\n}\n");
+
+        $controllerFile = $tempDir . '/app/Http/Controllers/BukuController.php';
+        file_put_contents($controllerFile, "<?php\nnamespace App\Http\Controllers;\nuse App\Http\Requests\UpdateBukuRequest;\nclass BukuController {\npublic function update(UpdateBukuRequest \$request, Buku \$buku) {\n\$buku->save();\n}\n}\n");
+
+        $scanner = new \Waskita\Security\Scanners\IdorScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertCount(1, $results);
+        $this->assertSame('IDOR_MISSING_AUTHORIZATION', $results[0]->ruleId);
+        $this->assertStringContainsString('UpdateBukuRequest', $results[0]->description);
+        $this->assertStringContainsString('mengembalikan nilai \'true\'', $results[0]->description);
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_idor_scanner_skips_when_authorize_resource_present(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_auth_res_' . uniqid();
+        mkdir($tempDir . '/app/Http/Controllers', 0777, true);
+
+        $controllerFile = $tempDir . '/app/Http/Controllers/ProdukController.php';
+        file_put_contents($controllerFile, "<?php\nnamespace App\Http\Controllers;\nclass ProdukController {\npublic function __construct() {\n\$this->authorizeResource(Produk::class, 'produk');\n}\npublic function edit(Produk \$produk) {}\npublic function update(Request \$request, Produk \$produk) {}\npublic function destroy(Produk \$produk) {}\n}\n");
+
+        $scanner = new \Waskita\Security\Scanners\IdorScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Controller with $this->authorizeResource() should not flag resource methods as IDOR.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Helpers
     // ─────────────────────────────────────────────────────────────

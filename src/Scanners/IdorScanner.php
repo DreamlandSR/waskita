@@ -11,13 +11,18 @@ use Waskita\Security\Core\ScannerInterface;
  * IdorScanner - Mendeteksi kerentanan Insecure Direct Object References (IDOR).
  *
  * Mendukung 2 mode pemindaian:
- * 1. Live Router Container (Akurat 100%): Membaca mapping aksi controller ke middleware peran aplikasi.
- * 2. Static File Analysis (Fallback): Analisis sintaksis statis file controller & route.
+ * 1. Live Router & Container Reflection (Akurat 100%):
+ *    - Membaca mapping aksi controller ke middleware peran aplikasi.
+ *    - Memeriksa otorisasi FormRequest::authorize() via PHP Reflection.
+ *    - Memeriksa $this->authorizeResource() pada controller.
+ * 2. Static File Analysis (Fallback):
+ *    - Analisis sintaksis statis file controller, form request, & route.
  *
  * Pemeriksaan:
  * 1. Controller actions yang menerima model/ID tanpa pengecekan authorization atau role middleware.
- * 2. Route model binding tanpa middleware 'can:' atau policy.
- * 3. Direct query Model::findOrFail($id) tanpa verifikasi kepemilikan data pada konteks non-admin.
+ * 2. FormRequest::authorize() yang mengembalikan 'true' tanpa proteksi izin/policy.
+ * 3. Route model binding tanpa middleware 'can:' atau policy.
+ * 4. Direct query Model::findOrFail($id) tanpa verifikasi kepemilikan data pada konteks non-admin.
  */
 class IdorScanner implements ScannerInterface
 {
@@ -77,7 +82,7 @@ class IdorScanner implements ScannerInterface
 
     public function getDescription(): string
     {
-        return 'Mendeteksi potensi IDOR: controller actions tanpa authorization check, route tanpa middleware can:, dan direct object query tanpa verifikasi kepemilikan.';
+        return 'Mendeteksi potensi IDOR: controller actions tanpa authorization check, FormRequest::authorize() return true tanpa izin, route tanpa middleware can:, dan direct object query tanpa verifikasi kepemilikan.';
     }
 
     public function scan(string $basePath, array $config = []): array
@@ -152,12 +157,18 @@ class IdorScanner implements ScannerInterface
 
         $fullClassName = $this->extractFullClassName($content);
 
+        // Cek apakah controller menggunakan $this->authorizeResource(...)
+        $hasAuthorizeResource = (bool) preg_match('/\$this->authorizeResource\s*\(/', $content);
+
         // Cari semua method public dalam class
         $pattern = '/public\s+function\s+(\w+)\s*\(([^)]*)\)/';
 
         if (! preg_match_all($pattern, $content, $methodMatches, PREG_OFFSET_CAPTURE)) {
             return [];
         }
+
+        // Daftar method yang terverifikasi aman untuk dilewati oleh scanDirectObjectQuery
+        $safeMethods = [];
 
         foreach ($methodMatches[0] as $i => $match) {
             $methodName = $methodMatches[1][$i][0];
@@ -167,6 +178,14 @@ class IdorScanner implements ScannerInterface
 
             // Jika aksi termasuk aksi publik read-only, abaikan cek kepemilikan
             if (in_array(strtolower($methodName), $publicActions, true)) {
+                $safeMethods[] = $methodName;
+                continue;
+            }
+
+            // Jika controller menggunakan $this->authorizeResource(...) dan method ini adalah resource action standar
+            $isResourceAction = in_array(strtolower($methodName), self::RESOURCE_ACTIONS, true);
+            if ($hasAuthorizeResource && $isResourceAction) {
+                $safeMethods[] = $methodName;
                 continue;
             }
 
@@ -175,11 +194,11 @@ class IdorScanner implements ScannerInterface
             $appliedMiddlewares = $actionMiddlewareMap[$actionKey] ?? [];
 
             if ($this->hasRoleMiddleware($appliedMiddlewares, $roleMiddlewares)) {
+                $safeMethods[] = $methodName;
                 continue;
             }
 
             // Hanya audit resource actions atau methods yang menerima model/id parameter
-            $isResourceAction = in_array(strtolower($methodName), self::RESOURCE_ACTIONS, true);
             $hasModelParam = $this->hasModelOrIdParam($params);
 
             if (! $isResourceAction && ! $hasModelParam) {
@@ -193,32 +212,279 @@ class IdorScanner implements ScannerInterface
                 continue;
             }
 
-            // Cek apakah ada authorization check di method body
+            // 1. Cek apakah ada authorization check di method body
             $hasAuthCheck = $this->hasAuthorizationCheck($methodBody);
 
+            // 2. Jika tidak ada di method body, periksa FormRequest::authorize() via Reflection & Static Fallback
+            $formReqInfo = [
+                'has_form_request' => false,
+                'request_class' => null,
+                'is_authorized' => false,
+                'returns_true_only' => false,
+                'reason' => '',
+            ];
+
             if (! $hasAuthCheck) {
+                $formReqInfo = $this->inspectFormRequestAuthorization($fullClassName, $methodName, $params, $content, $basePath);
+                if ($formReqInfo['is_authorized']) {
+                    $hasAuthCheck = true;
+                }
+            }
+
+            if ($hasAuthCheck) {
+                $safeMethods[] = $methodName;
+            } else {
                 $snippet = trim($lines[$methodLine - 1] ?? $match[0]);
                 $paramDesc = $hasModelParam ? $this->describeModelParams($params) : 'resource action';
+
+                if ($formReqInfo['has_form_request'] && $formReqInfo['returns_true_only']) {
+                    $desc = "Method '{$methodName}' menerima model/ID ({$paramDesc}) dan menginjeksi FormRequest '{$formReqInfo['request_class']}', tetapi method authorize() mengembalikan nilai 'true' tanpa pemeriksaan izin/kebijakan, serta tidak ada authorization check di controller.";
+                    $fix = "Implementasikan otorisasi pada {$formReqInfo['request_class']}::authorize() (misal: return \$this->user()->can('update', \$this->route(...))) atau gunakan \$this->authorize() di controller.";
+                } else {
+                    $desc = "Method '{$methodName}' menerima parameter model/ID ({$paramDesc}) namun tidak ditemukan authorization check (authorize(), Gate, policy, FormRequest::authorize(), atau verifikasi kepemilikan user_id).";
+                    $fix = "Tambahkan \$this->authorize('update', \$model), implementasikan FormRequest::authorize(), atau gunakan Laravel Policy / Gate. Alternatif: scope query via auth()->user()->posts()->findOrFail(\$id).";
+                }
 
                 $results[] = new AuditResult(
                     ruleId: 'IDOR_MISSING_AUTHORIZATION',
                     category: 'idor',
                     severity: AuditResult::SEVERITY_HIGH,
                     title: "Potential IDOR: Missing Authorization in {$methodName}()",
-                    description: "Method '{$methodName}' menerima parameter model/ID ({$paramDesc}) namun tidak ditemukan authorization check (authorize(), Gate, policy, atau verifikasi kepemilikan user_id).",
+                    description: $desc,
                     file: $relativePath,
                     line: $methodLine,
                     codeSnippet: $snippet,
-                    suggestion: "Tambahkan \$this->authorize('update', \$model) atau gunakan Laravel Policy / Gate. Alternatif: scope query via auth()->user()->posts()->findOrFail(\$id).",
+                    suggestion: $fix,
                     cveRef: 'CWE-639'
                 );
             }
         }
 
-        // Cek direct query tanpa scope user (menghindari false positive pada aksi ber-middleware admin)
-        $results = array_merge($results, $this->scanDirectObjectQuery($content, $relativePath, $lines, $fullClassName, $actionMiddlewareMap, $roleMiddlewares));
+        // Cek direct query tanpa scope user (menghindari false positive pada aksi ber-middleware admin atau safe methods)
+        $results = array_merge($results, $this->scanDirectObjectQuery($content, $relativePath, $lines, $fullClassName, $actionMiddlewareMap, $roleMiddlewares, $safeMethods));
 
         return $results;
+    }
+
+    /**
+     * Memeriksa otorisasi FormRequest pada parameter method controller.
+     * Mendukung Reflection (Container/Class loaded) dan Fallback Statis (File parsing).
+     *
+     * @return array{has_form_request: bool, request_class: ?string, is_authorized: bool, returns_true_only: bool, reason: string}
+     */
+    private function inspectFormRequestAuthorization(
+        string $fullClassName,
+        string $methodName,
+        string $params,
+        string $controllerContent,
+        string $basePath
+    ): array {
+        // 1. Coba via Reflection jika class controller ter-load
+        if ($fullClassName !== '' && class_exists($fullClassName)) {
+            try {
+                $refMethod = new \ReflectionMethod($fullClassName, $methodName);
+                foreach ($refMethod->getParameters() as $param) {
+                    $type = $param->getType();
+                    if (! $type instanceof \ReflectionNamedType || $type->isBuiltin()) {
+                        continue;
+                    }
+
+                    $paramClassName = $type->getName();
+                    if (! class_exists($paramClassName)) {
+                        continue;
+                    }
+
+                    if (is_subclass_of($paramClassName, 'Illuminate\Foundation\Http\FormRequest')) {
+                        return $this->inspectFormRequestClass($paramClassName);
+                    }
+                }
+            } catch (\Throwable) {
+                // Lanjut ke fallback statis
+            }
+        }
+
+        // 2. Fallback Statis: Cari tipe parameter yang berakhiran 'Request'
+        return $this->inspectFormRequestStatic($params, $controllerContent, $basePath);
+    }
+
+    /**
+     * Analisis method authorize() pada kelas FormRequest via Reflection.
+     *
+     * @param class-string $formRequestClass
+     * @return array{has_form_request: bool, request_class: string, is_authorized: bool, returns_true_only: bool, reason: string}
+     */
+    private function inspectFormRequestClass(string $formRequestClass): array
+    {
+        try {
+            $refClass = new \ReflectionClass($formRequestClass);
+            if (! $refClass->hasMethod('authorize')) {
+                return [
+                    'has_form_request' => true,
+                    'request_class' => $formRequestClass,
+                    'is_authorized' => false,
+                    'returns_true_only' => false,
+                    'reason' => 'Method authorize() tidak didefinisikan.',
+                ];
+            }
+
+            $authMethod = $refClass->getMethod('authorize');
+
+            // Jika method authorize() tidak dioverride oleh FormRequest kustom (hanya bawaan framework)
+            if ($authMethod->getDeclaringClass()->getName() === 'Illuminate\Foundation\Http\FormRequest') {
+                return [
+                    'has_form_request' => true,
+                    'request_class' => $formRequestClass,
+                    'is_authorized' => false,
+                    'returns_true_only' => false,
+                    'reason' => 'Menggunakan bawaan base FormRequest::authorize().',
+                ];
+            }
+
+            $fileName = $authMethod->getFileName();
+            if ($fileName && file_exists($fileName)) {
+                $body = $this->extractMethodContent($fileName, $authMethod);
+                if ($body !== null) {
+                    if ($this->hasAuthorizationCheck($body)) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $formRequestClass,
+                            'is_authorized' => true,
+                            'returns_true_only' => false,
+                            'reason' => 'FormRequest::authorize() memiliki logika otorisasi.',
+                        ];
+                    }
+
+                    $stripped = preg_replace('/\s+/', '', strtolower($body));
+                    if (str_contains($stripped, 'returnfalse;')) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $formRequestClass,
+                            'is_authorized' => true,
+                            'returns_true_only' => false,
+                            'reason' => 'FormRequest::authorize() menolak akses secara default (return false).',
+                        ];
+                    }
+
+                    if (str_contains($stripped, 'returntrue;')) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $formRequestClass,
+                            'is_authorized' => false,
+                            'returns_true_only' => true,
+                            'reason' => 'FormRequest::authorize() mengembalikan true tanpa validasi izin.',
+                        ];
+                    }
+                }
+            }
+        } catch (\Throwable) {
+            // Abaikan kesalahan reflection
+        }
+
+        return [
+            'has_form_request' => true,
+            'request_class' => $formRequestClass,
+            'is_authorized' => false,
+            'returns_true_only' => false,
+            'reason' => 'Tidak dapat memverifikasi otorisasi FormRequest.',
+        ];
+    }
+
+    /**
+     * Fallback analisis statis untuk mendeteksi FormRequest dan membaca authorize() dari file.
+     *
+     * @return array{has_form_request: bool, request_class: ?string, is_authorized: bool, returns_true_only: bool, reason: string}
+     */
+    private function inspectFormRequestStatic(string $params, string $controllerContent, string $basePath): array
+    {
+        // Cari typehint parameter seperti (UpdateBeritaRequest $request)
+        if (! preg_match('/(?:^|,\s*)([A-Z]\w*Request)\s+\$\w+/', $params, $match)) {
+            return [
+                'has_form_request' => false,
+                'request_class' => null,
+                'is_authorized' => false,
+                'returns_true_only' => false,
+                'reason' => '',
+            ];
+        }
+
+        $requestShortName = $match[1];
+        if (in_array($requestShortName, ['Request', 'FormRequest'], true)) {
+            return [
+                'has_form_request' => false,
+                'request_class' => null,
+                'is_authorized' => false,
+                'returns_true_only' => false,
+                'reason' => '',
+            ];
+        }
+
+        // Resolusi namespace dari use statement
+        $targetFile = null;
+        if (preg_match('/use\s+([^;]+?\\\\' . preg_quote($requestShortName, '/') . ');/', $controllerContent, $useMatch)) {
+            $fullRequestClass = trim($useMatch[1]);
+            $relativeClassPath = str_replace(['App\\', '\\'], ['', '/'], $fullRequestClass) . '.php';
+            $candidate = $basePath . '/app/' . $relativeClassPath;
+            if (file_exists($candidate)) {
+                $targetFile = $candidate;
+            }
+        }
+
+        if ($targetFile === null) {
+            // Default path convention: app/Http/Requests/{Name}.php
+            $defaultCandidate = $basePath . '/app/Http/Requests/' . $requestShortName . '.php';
+            if (file_exists($defaultCandidate)) {
+                $targetFile = $defaultCandidate;
+            }
+        }
+
+        if ($targetFile !== null && file_exists($targetFile)) {
+            $reqContent = (string) file_get_contents($targetFile);
+            if (preg_match('/public\s+function\s+authorize\s*\([^)]*\)/', $reqContent, $authMatches, PREG_OFFSET_CAPTURE)) {
+                $authOffset = (int) $authMatches[0][1];
+                $authBody = $this->extractMethodBody($reqContent, $authOffset);
+
+                if ($authBody !== null) {
+                    if ($this->hasAuthorizationCheck($authBody)) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $requestShortName,
+                            'is_authorized' => true,
+                            'returns_true_only' => false,
+                            'reason' => 'FormRequest::authorize() memiliki logika otorisasi (statis).',
+                        ];
+                    }
+
+                    $stripped = preg_replace('/\s+/', '', strtolower($authBody));
+                    if (str_contains($stripped, 'returntrue;')) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $requestShortName,
+                            'is_authorized' => false,
+                            'returns_true_only' => true,
+                            'reason' => 'FormRequest::authorize() mengembalikan true tanpa validasi izin (statis).',
+                        ];
+                    }
+
+                    if (str_contains($stripped, 'returnfalse;')) {
+                        return [
+                            'has_form_request' => true,
+                            'request_class' => $requestShortName,
+                            'is_authorized' => true,
+                            'returns_true_only' => false,
+                            'reason' => 'FormRequest::authorize() menolak akses default (statis).',
+                        ];
+                    }
+                }
+            }
+        }
+
+        return [
+            'has_form_request' => true,
+            'request_class' => $requestShortName,
+            'is_authorized' => false,
+            'returns_true_only' => false,
+            'reason' => 'FormRequest terdeteksi tetapi tidak ditemukan logika otorisasi valid.',
+        ];
     }
 
     /**
@@ -230,7 +496,11 @@ class IdorScanner implements ScannerInterface
     private function scanLiveRoutes(string $basePath, array $config = []): array
     {
         $results = [];
-        $container = \Illuminate\Container\Container::getInstance();
+        $container = \class_exists(\Illuminate\Container\Container::class) ? \Illuminate\Container\Container::getInstance() : null;
+        if ($container === null || ! $container->bound('router')) {
+            return [];
+        }
+
         $router = $container->make('router');
         $routes = $router->getRoutes();
 
@@ -455,6 +725,29 @@ class IdorScanner implements ScannerInterface
     }
 
     /**
+     * Ekstrak teks konten method dari file berdasarkan objek ReflectionMethod.
+     */
+    private function extractMethodContent(string $filePath, \ReflectionMethod $ref): ?string
+    {
+        if (! file_exists($filePath)) {
+            return null;
+        }
+
+        $startLine = $ref->getStartLine();
+        $endLine = $ref->getEndLine();
+        if (! $startLine || ! $endLine) {
+            return null;
+        }
+
+        $lines = file($filePath, FILE_IGNORE_NEW_LINES);
+        if ($lines === false) {
+            return null;
+        }
+
+        return implode("\n", array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+    }
+
+    /**
      * Cek apakah method body mengandung authorization check.
      */
     private function hasAuthorizationCheck(string $methodBody): bool
@@ -474,6 +767,7 @@ class IdorScanner implements ScannerInterface
      * @param string[] $lines
      * @param array<string, string[]> $actionMiddlewareMap
      * @param string[] $roleMiddlewares
+     * @param string[] $safeMethods
      * @return AuditResult[]
      */
     private function scanDirectObjectQuery(
@@ -482,7 +776,8 @@ class IdorScanner implements ScannerInterface
         array $lines,
         string $fullClassName = '',
         array $actionMiddlewareMap = [],
-        array $roleMiddlewares = []
+        array $roleMiddlewares = [],
+        array $safeMethods = []
     ): array {
         $results = [];
 
@@ -493,16 +788,20 @@ class IdorScanner implements ScannerInterface
                 $offset = (int) $match[1];
                 $lineNumber = substr_count(substr($content, 0, $offset), "\n") + 1;
 
+                $enclosingMethod = $this->getEnclosingMethodName($content, $offset);
+
+                // Jika method pembungkus sudah terverifikasi aman (misal memiliki FormRequest::authorize())
+                if ($enclosingMethod !== null && in_array($enclosingMethod, $safeMethods, true)) {
+                    continue;
+                }
+
                 // Cek apakah method pembungkus query ini dilindungi oleh middleware admin/role
-                if ($fullClassName !== '' && ! empty($actionMiddlewareMap)) {
-                    $enclosingMethod = $this->getEnclosingMethodName($content, $offset);
-                    if ($enclosingMethod !== null) {
-                        $actionKey = $fullClassName . '@' . $enclosingMethod;
-                        $appliedMiddlewares = $actionMiddlewareMap[$actionKey] ?? [];
-                        if ($this->hasRoleMiddleware($appliedMiddlewares, $roleMiddlewares)) {
-                            // Query terjadi di dalam method administratif terproteksi
-                            continue;
-                        }
+                if ($fullClassName !== '' && ! empty($actionMiddlewareMap) && $enclosingMethod !== null) {
+                    $actionKey = $fullClassName . '@' . $enclosingMethod;
+                    $appliedMiddlewares = $actionMiddlewareMap[$actionKey] ?? [];
+                    if ($this->hasRoleMiddleware($appliedMiddlewares, $roleMiddlewares)) {
+                        // Query terjadi di dalam method administratif terproteksi
+                        continue;
                     }
                 }
 
