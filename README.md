@@ -4,7 +4,7 @@
 
 > *Dari bahasa Jawa Kuno/Sanskerta **'Waskitha'** yang berarti **'tajam penglihatan batinnya, mampu melihat apa yang tersembunyi dan tidak tampak oleh mata biasa'**. Waskita dirancang untuk melihat titik buta keamanan yang dilewatkan oleh static analysis biasa: IDOR tersembunyi, bypass XSS, celah logika bisnis, dan konfigurasi tidak aman yang luput dari perhatian.*
 
-[![Latest Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://packagist.org/packages/waskita/security)
+[![Latest Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://packagist.org/packages/waskita/security)
 [![PHP Version](https://img.shields.io/badge/php-%5E8.2-777bb4.svg)](https://php.net)
 [![Laravel Support](https://img.shields.io/badge/laravel-11.x%20%7C%2012.x-ff2d20.svg)](https://laravel.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)

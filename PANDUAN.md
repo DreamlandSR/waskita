@@ -746,5 +746,5 @@ security_audit:
 
 ---
 
-> **Dokumen ini ditulis untuk versi Waskita v1.0.0.**  
+> **Dokumen ini ditulis untuk versi Waskita v0.1.0.**  
 > Untuk pertanyaan atau kontribusi, silakan buka issue di [GitHub Repository](https://github.com/waskita/security).
