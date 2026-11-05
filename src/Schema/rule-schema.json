@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://waskita.dev/schemas/rule-v1.json",
+  "title": "Waskita Security Rule",
+  "description": "JSON Schema for Waskita YAML security rule definitions.",
+  "type": "object",
+  "required": ["id", "name", "severity", "scanner", "pattern"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Unique kebab-case identifier for the rule (e.g. 'sql-injection-raw-query')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 120,
+      "description": "Human-readable rule name."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Detailed explanation of what this rule detects."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low", "info"],
+      "description": "Severity level assigned to findings produced by this rule."
+    },
+    "scanner": {
+      "type": "string",
+      "description": "The scanner class or alias that processes this rule (e.g. 'QueryInjectionScanner')."
+    },
+    "pattern": {
+      "type": "object",
+      "description": "Detection pattern configuration.",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["regex", "ast", "function_call", "config_check", "file_exists"],
+          "description": "Pattern matching strategy."
+        },
+        "value": {
+          "type": "string",
+          "description": "The pattern value: regex string, AST node type, function name, config key, or file path."
+        },
+        "flags": {
+          "type": "string",
+          "description": "Optional regex flags (e.g. 'i' for case-insensitive).",
+          "default": ""
+        },
+        "context": {
+          "type": "string",
+          "enum": ["php", "blade", "config", "routes", "env", "yaml", "json"],
+          "description": "File context in which the pattern is evaluated.",
+          "default": "php"
+        }
+      },
+      "additionalProperties": false
+    },
+    "targets": {
+      "type": "object",
+      "description": "File targeting constraints.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns of files to scan (e.g. ['app/**/*.php'])."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns of files to skip."
+        }
+      },
+      "additionalProperties": false
+    },
+    "fix": {
+      "type": "object",
+      "description": "Suggested fix metadata.",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable fix instruction."
+        },
+        "diff": {
+          "type": "object",
+          "properties": {
+            "before": { "type": "string" },
+            "after": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Example code before and after applying the fix."
+        },
+        "reference": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to documentation or advisory for this vulnerability."
+        }
+      },
+      "additionalProperties": false
+    },
+    "cve": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^CVE-\\d{4}-\\d{4,}$"
+      },
+      "description": "Related CVE identifiers."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Categorical tags (e.g. ['owasp-a1', 'injection', 'sql'])."
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether this rule is active."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this rule definition.",
+      "default": "1.0.0"
+    }
+  }
+}

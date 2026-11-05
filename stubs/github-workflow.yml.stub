@@ -1,0 +1,123 @@
+name: Waskita Security Audit
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  schedule:
+    # Jalankan audit berkala setiap hari Senin jam 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  security-audit:
+    name: Run Waskita Vulnerability Scanner
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP Environment
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite
+          coverage: none
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare Application Environment
+        run: |
+          if [ ! -f .env ]; then
+            cp .env.example .env
+          fi
+          php artisan key:generate --no-interaction
+
+      - name: Run Waskita Security Audit
+        id: waskita-audit
+        run: |
+          # Jalankan audit dengan output format github dan json
+          mkdir -p storage/waskita
+          php artisan waskita:audit --format=agent --output=storage/waskita/report.json || true
+          php artisan waskita:audit --format=github --fail-on=high
+
+      - name: Publish Step Summary
+        if: always()
+        run: |
+          if [ -f storage/waskita/report.json ]; then
+            python3 -c "
+          import json, os
+
+          try:
+              with open('storage/waskita/report.json') as f:
+                  data = json.load(f)
+              
+              summary = data.get('summary', {})
+              critical = summary.get('critical', 0)
+              high = summary.get('high', 0)
+              medium = summary.get('medium', 0)
+              low = summary.get('low', 0)
+              total = summary.get('total', 0)
+
+              status = '🚨 GAGAL (Ditemukan Celah Kritis/Tinggi)' if (critical + high) > 0 else '✅ LOLOS AUDIT'
+
+              md = f'''## 🛡️ Waskita Security Audit Report
+
+          **Status:** {status}
+          **Total Temuan:** {total}
+
+          | Tingkat Keparahan | Jumlah |
+          |---|---|
+          | 🔴 Kritis (Critical) | **{critical}** |
+          | 🟠 Tinggi (High) | **{high}** |
+          | 🟡 Sedang (Medium) | {medium} |
+          | 🔵 Rendah (Low) | {low} |
+
+          '''
+              findings = data.get('findings', [])
+              if findings:
+                  md += '### 📋 Daftar Temuan Utama\n\n'
+                  md += '| ID | Kategori | Keparahan | Lokasi | Keterangan |\n'
+                  md += '|---|---|---|---|---|\n'
+                  for f in findings[:20]:
+                      rule_id = f.get('rule_id', '-')
+                      cat = f.get('category', '-')
+                      sev = f.get('severity', '-').upper()
+                      file = f.get('file', '-')
+                      line = f.get('line', '-')
+                      desc = f.get('description', '').replace('\n', ' ')
+                      md += f'| `{rule_id}` | {cat} | {sev} | `{file}:{line}` | {desc} |\n'
+
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write(md)
+          except Exception as e:
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write(f'### ⚠️ Gagal memproses ringkasan audit: {e}\n')
+          "
+          fi
+
+      - name: Upload Security Audit Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: waskita-security-report
+          path: storage/waskita/report.json
+          retention-days: 14

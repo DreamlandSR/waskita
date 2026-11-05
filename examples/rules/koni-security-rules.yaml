@@ -1,0 +1,190 @@
+# =============================================================================
+# Waskita — Contoh Aturan Keamanan: Proyek Web KONI
+# =============================================================================
+# Contoh aturan keamanan yang dibuat berdasarkan audit terhadap proyek
+# web-koni — Sistem Informasi KONI Kota Depok.
+#
+# Contoh ini menunjukkan cara menulis aturan bisnis-spesifik (bukan hanya
+# aturan generik) untuk menangkap celah keamanan yang unik pada proyek Anda.
+# =============================================================================
+
+meta:
+  id: koni-security
+  name: "Web KONI - Aturan Keamanan Khusus"
+  version: "1.0.0"
+  category: custom
+  project: "web-koni"
+  description: >
+    Aturan keamanan khusus untuk proyek Web KONI yang memeriksa:
+    - Pembatasan akses role 'penulis' ke resource admin
+    - Validasi transisi status Berita
+    - Keamanan endpoint reset kata sandi
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: Penulis Mengakses Resource Admin
+  # ---------------------------------------------------------------------------
+  - id: KONI-001
+    name: "Penulis Accessing Admin Resources"
+    severity: high
+    confidence: high
+    scanner: route
+    description: >
+      Rute-rute yang ditujukan untuk admin (AdminBeritaController,
+      AdminInformasiController, PenggunaController, dll.) harus dilindungi
+      oleh middleware 'PastikanAdmin' atau policy yang memvalidasi role.
+      User dengan role 'penulis' hanya boleh mengakses PenulisBeritaController
+      dan ProfilController.
+    pattern:
+      type: route_definition
+      controller_patterns:
+        - "Admin*Controller"
+        - "PenggunaController"
+        - "RingkasanController"
+        - "AdminPermintaanKataSandiController"
+      missing_middleware:
+        - "PastikanAdmin"
+        - "can:admin"
+        - "role:admin"
+    examples:
+      vulnerable: |
+        // routes/web.php
+        Route::resource('berita', AdminBeritaController::class);
+        // ❌ Tanpa middleware PastikanAdmin — penulis bisa akses halaman admin
+      secure: |
+        // routes/web.php
+        Route::middleware(['auth', 'PastikanAdmin'])->group(function () {
+            Route::resource('berita', AdminBeritaController::class);
+        });
+        // ✅ Hanya admin yang bisa akses
+    remediation: >
+      Bungkus semua route admin dengan middleware 'PastikanAdmin'.
+      Pastikan middleware PastikanAdmin memeriksa: auth()->user()->role === 'admin'.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Transisi Status Berita Tanpa Validasi
+  # ---------------------------------------------------------------------------
+  - id: KONI-002
+    name: "Berita Status Transition Without Guard"
+    severity: medium
+    confidence: medium
+    scanner: controller
+    description: >
+      Perubahan status Berita (draft → terbit, terbit → arsip, dll.)
+      harus divalidasi dan dibatasi berdasarkan role pengguna. Penulis
+      hanya boleh mengirim berita untuk review, bukan langsung menerbitkan.
+      Admin yang berhak menerbitkan atau mengarsipkan berita.
+    pattern:
+      type: php_method_call
+      context: controller
+      detects:
+        - model_class: "Berita"
+          property_set: "status"
+          missing_validation:
+            - "in_array("
+            - "Rule::in("
+            - "match("
+            - "$this->authorize"
+    examples:
+      vulnerable: |
+        // PenulisBeritaController.php
+        public function update(Request $request, Berita $berita)
+        {
+            $berita->status = $request->input('status'); // ❌ Penulis bisa set 'terbit'!
+            $berita->save();
+        }
+      secure: |
+        // PenulisBeritaController.php
+        public function update(Request $request, Berita $berita)
+        {
+            $request->validate([
+                'status' => ['required', Rule::in(['draft', 'menunggu_review'])],
+            ]);
+
+            // Penulis hanya boleh mengirim ke review
+            abort_if($request->status === 'terbit' && auth()->user()->role !== 'admin', 403);
+
+            $berita->status = $request->validated()['status'];
+            $berita->save();
+        }
+    remediation: >
+      Validasi transisi status menggunakan Rule::in() dengan daftar status
+      yang diizinkan untuk role pengguna saat ini. Buat method atau Policy
+      yang mendefinisikan state machine (status mana yang boleh bertransisi ke mana).
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Endpoint PermintaanResetKataSandi Hanya untuk Admin
+  # ---------------------------------------------------------------------------
+  - id: KONI-003
+    name: "Password Reset Request Not Admin-Only"
+    severity: high
+    confidence: high
+    scanner: route
+    description: >
+      AdminPermintaanKataSandiController menangani permintaan reset kata sandi.
+      Controller ini harus hanya bisa diakses oleh admin. Jika terbuka untuk
+      penulis atau publik, penulis bisa mereset password admin.
+    pattern:
+      type: route_definition
+      controller_patterns:
+        - "AdminPermintaanKataSandiController"
+      missing_middleware:
+        - "PastikanAdmin"
+        - "can:admin"
+        - "role:admin"
+    examples:
+      vulnerable: |
+        Route::get('/permintaan-reset-sandi', [AdminPermintaanKataSandiController::class, 'index']);
+        // ❌ Siapapun yang login bisa melihat dan memproses permintaan reset
+      secure: |
+        Route::middleware(['auth', 'PastikanAdmin'])->group(function () {
+            Route::get('/permintaan-reset-sandi', [AdminPermintaanKataSandiController::class, 'index']);
+            Route::post('/permintaan-reset-sandi/{id}/approve', [AdminPermintaanKataSandiController::class, 'approve']);
+        });
+        // ✅ Hanya admin yang bisa memproses
+    remediation: >
+      Pindahkan semua route AdminPermintaanKataSandiController ke dalam
+      group middleware ['auth', 'PastikanAdmin']. Tambahkan pengecekan
+      di controller constructor sebagai lapisan keamanan tambahan.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: PenulisBeritaController — Berita milik penulis lain
+  # ---------------------------------------------------------------------------
+  - id: KONI-004
+    name: "Penulis Can Access Other Author's Berita"
+    severity: high
+    confidence: medium
+    scanner: controller
+    description: >
+      PenulisBeritaController tidak memvalidasi bahwa Berita yang diakses
+      milik penulis yang sedang login. Tanpa pengecekan ownership, seorang
+      penulis bisa mengedit atau menghapus berita penulis lain.
+    pattern:
+      type: php_method
+      class: "PenulisBeritaController"
+      methods: ["edit", "update", "destroy"]
+      missing_ownership_check:
+        - "$berita->user_id"
+        - "$berita->penulis_id"
+        - "auth()->id()"
+        - "$this->authorize"
+    examples:
+      vulnerable: |
+        // PenulisBeritaController.php
+        public function edit(Berita $berita)
+        {
+            return view('penulis.berita.edit', compact('berita'));
+            // ❌ Penulis A bisa edit Berita milik Penulis B!
+        }
+      secure: |
+        public function edit(Berita $berita)
+        {
+            abort_unless($berita->user_id === auth()->id(), 403,
+                'Anda tidak memiliki hak akses terhadap berita ini.');
+            return view('penulis.berita.edit', compact('berita'));
+            // ✅ Hanya penulis pemilik yang bisa edit
+        }
+    remediation: >
+      Tambahkan abort_unless($berita->user_id === auth()->id(), 403) di setiap
+      method yang mengakses Berita spesifik. Atau buat BeritaPolicy dan gunakan
+      $this->authorize('update', $berita) di controller.

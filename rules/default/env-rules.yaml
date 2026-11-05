@@ -1,0 +1,203 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: Environment & Secrets (.env)
+# =============================================================================
+# Referensi: OWASP Top 10 — A05:2021 Security Misconfiguration
+# CVE Terkait:
+#   - CVE-2021-3129: Laravel Ignition RCE via APP_DEBUG=true
+#   - CVE-2018-15133: Laravel Insecure Deserialization via known/default APP_KEY
+# =============================================================================
+
+meta:
+  id: env-secrets
+  name: "Environment & Secrets Configuration"
+  version: "1.0.0"
+  category: env
+  owasp: "A05:2021 Security Misconfiguration"
+  cve:
+    - "CVE-2021-3129"
+    - "CVE-2018-15133"
+  description: >
+    Aturan ini memeriksa konfigurasi file environment (.env), file konfigurasi
+    (config/*.php), dan potensi kebocoran rahasia serta konfigurasi berbahaya
+    seperti debug mode aktif di production dan secret key kosong/lemah.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: APP_DEBUG=true di Production (CVE-2021-3129)
+  # ---------------------------------------------------------------------------
+  - id: ENV-001
+    name: "APP_DEBUG Enabled in Production Environment"
+    severity: critical
+    confidence: high
+    scanner: env
+    cve: "CVE-2021-3129"
+    description: >
+      APP_DEBUG diatur ke 'true' pada environment production (APP_ENV=production).
+      Mode debug menampilkan stack trace lengkap yang membocorkan kredensial
+      database, API keys, path server, dan struktur kode.
+      Pada Laravel versi tertentu, Ignition debug page memiliki celah RCE
+      (Remote Code Execution) kritis (CVE-2021-3129).
+    pattern:
+      type: env_pair_condition
+      conditions:
+        - key: "APP_ENV"
+          match: ["production", "prod"]
+        - key: "APP_DEBUG"
+          match: ["true", "1", "yes"]
+    examples:
+      vulnerable: |
+        # .env
+        APP_ENV=production
+        APP_DEBUG=true  # ❌ KRITIS: Stack trace & celah CVE-2021-3129 RCE
+      secure: |
+        # .env
+        APP_ENV=production
+        APP_DEBUG=false # ✅ AMAN: Pesan error generik ditampilkan ke pengguna
+    remediation: >
+      Ubah APP_DEBUG=false di file .env server produksi Anda sekarang juga.
+      Jalankan `php artisan config:cache` untuk memastikan perubahan terbaca.
+      Gunakan tool logging eksternal (seperti Sentry, Flare, Bugsnag) untuk
+      memantau error di production tanpa mengeksposnya ke pengguna.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: APP_KEY Kosong atau Bernilai Default (CVE-2018-15133)
+  # ---------------------------------------------------------------------------
+  - id: ENV-002
+    name: "Empty, Default, or Compromised APP_KEY"
+    severity: critical
+    confidence: high
+    scanner: env
+    cve: "CVE-2018-15133"
+    description: >
+      APP_KEY kosong, belum di-generate, atau menggunakan key contoh dari template.
+      APP_KEY digunakan untuk mengenkripsi cookie, session, dan data sensitif lainnya.
+      Jika APP_KEY diketahui penyerang, mereka dapat membuat payload serialized
+      terenkripsi untuk memicu Remote Code Execution (RCE) via CVE-2018-15133.
+    pattern:
+      type: env_key_check
+      key: "APP_KEY"
+      invalid_conditions:
+        - is_empty: true
+        - equals_any:
+            - "SomeRandomString"
+            - "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            - "base64:1234567890123456789012345678901234567890123="
+        - regex: "^(base64:)?0{44}$"
+        - length_less_than: 32
+    examples:
+      vulnerable: |
+        # .env
+        APP_KEY= # ❌ KOSONG
+        # atau
+        APP_KEY=base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= # ❌ DUMMY
+      secure: |
+        # .env
+        APP_KEY=base64:9D3xKj8uR...Panjang32ByteTerenkripsi...= # ✅ GENERATED
+    remediation: >
+      Jalankan perintah berikut di terminal:
+      `php artisan key:generate`
+      Pastikan file .env tidak pernah di-commit ke Git repository (.gitignore).
+      Jika key pernah bocor ke public repository, segera rotate APP_KEY dan
+      invalidasi semua active session.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: SESSION_SECURE_COOKIE tidak aktif di Production
+  # ---------------------------------------------------------------------------
+  - id: ENV-003
+    name: "Session Secure Cookie Disabled in Production"
+    severity: high
+    confidence: high
+    scanner: config
+    description: >
+      SESSION_SECURE_COOKIE bernilai false atau null di production.
+      Cookie session tidak ditandai dengan flag 'Secure', sehingga browser
+      dapat mengirimkan cookie melalui koneksi HTTP plain-text yang tidak aman.
+      Ini memungkinkan serangan Man-in-the-Middle (MitM) untuk mencuri session.
+    pattern:
+      type: config_check
+      file: "config/session.php"
+      config_key: "secure"
+      expected_in_production: true
+      env_keys:
+        - key: "SESSION_SECURE_COOKIE"
+          match: ["false", "0", "null", ""]
+    examples:
+      vulnerable: |
+        # .env
+        SESSION_SECURE_COOKIE=false # ❌ Cookie dikirim lewat plain HTTP
+
+        // config/session.php
+        'secure' => env('SESSION_SECURE_COOKIE', false),
+      secure: |
+        # .env
+        SESSION_SECURE_COOKIE=true # ✅ Cookie hanya dikirim lewat HTTPS
+
+        // config/session.php
+        'secure' => env('SESSION_SECURE_COOKIE', env('APP_ENV') === 'production'),
+    remediation: >
+      Tambahkan `SESSION_SECURE_COOKIE=true` pada file .env di production.
+      Pastikan juga `SESSION_HTTP_ONLY=true` dan `SESSION_SAME_SITE=lax` (atau strict)
+      di config/session.php untuk melindungi dari XSS dan CSRF.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: Database Kredensial Default atau Lemah
+  # ---------------------------------------------------------------------------
+  - id: ENV-004
+    name: "Default or Empty Database Password in Production"
+    severity: high
+    confidence: medium
+    scanner: env
+    description: >
+      Konfigurasi DB_PASSWORD kosong atau menggunakan password default ('root', 'password', '123456')
+      di environment production. Hal ini sangat membahayakan integritas basis data.
+    pattern:
+      type: env_pair_condition
+      conditions:
+        - key: "APP_ENV"
+          match: ["production", "prod"]
+        - key: "DB_PASSWORD"
+          match: ["", "root", "password", "admin", "123456", "12345678"]
+    examples:
+      vulnerable: |
+        APP_ENV=production
+        DB_PASSWORD= # ❌ KOSONG di production
+      secure: |
+        APP_ENV=production
+        DB_PASSWORD=a9F#8kLm$2Px!qW9 # ✅ Password kuat dan unik
+    remediation: >
+      Gunakan password database yang kuat, panjang, dan acak untuk server production.
+      Batasi akses database hanya dari host aplikasi lokal (127.0.0.1) atau VPC internal.
+
+  # ---------------------------------------------------------------------------
+  # RULE 5: File .env Terpapar di Public Directory / Git
+  # ---------------------------------------------------------------------------
+  - id: ENV-005
+    name: ".env File Located in Web Root or Tracked by Git"
+    severity: critical
+    confidence: high
+    scanner: filesystem
+    description: >
+      File .env berada di dalam direktori publik (public/) atau terdaftar
+      dalam git tracking (.gitignore tidak mengabaikan .env).
+      Penyerang dapat langsung mengunduh file .env melalui browser di
+      http://domain.com/.env dan membaca seluruh rahasia aplikasi.
+    pattern:
+      type: filesystem_check
+      checks:
+        - path_exists: "public/.env"
+        - path_exists: "public/.env.example"
+        - git_tracked: ".env"
+    examples:
+      vulnerable: |
+        # public/.env ada dan bisa diakses via web browser:
+        GET /.env HTTP/1.1 -> 200 OK (isi file .env terbongkar)
+      secure: |
+        # .env berada di root proyek (bukan di public/),
+        # dan .gitignore menyertakan baris:
+        /.env
+        /.env.backup
+        /.env.production
+    remediation: >
+      1. Pastikan DocumentRoot web server (Nginx/Apache) mengarah ke direktori `public/`, BUKAN ke root proyek.
+      2. Tambahkan rule di Nginx/Apache untuk memblokir akses ke file tersembunyi (dotfiles: `.*`).
+      3. Pastikan `.env` terdaftar di `.gitignore`. Jalankan `git rm --cached .env` jika pernah ter-commit.

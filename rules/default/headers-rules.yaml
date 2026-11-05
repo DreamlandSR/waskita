@@ -1,0 +1,201 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: HTTP Security Headers
+# =============================================================================
+# Referensi: OWASP Secure Headers Project
+# OWASP: A05:2021 Security Misconfiguration
+# =============================================================================
+
+meta:
+  id: security-headers
+  name: "HTTP Security Headers"
+  version: "1.0.0"
+  category: headers
+  owasp: "A05:2021 Security Misconfiguration"
+  description: >
+    Aturan ini memeriksa keberadaan HTTP Security Headers yang krusial
+    untuk melindungi browser pengguna dari serangan XSS, Clickjacking,
+    MIME-sniffing, dan Man-in-the-Middle (MitM). Dapat diperiksa via
+    middleware Laravel atau audit URL langsung (waskita:headers).
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: Strict-Transport-Security (HSTS)
+  # ---------------------------------------------------------------------------
+  - id: HDR-001
+    name: "Missing Strict-Transport-Security Header (HSTS)"
+    severity: high
+    confidence: high
+    scanner: headers
+    description: >
+      Header Strict-Transport-Security (HSTS) tidak ditemukan pada respon HTTP.
+      HSTS memerintahkan browser untuk HANYA berkomunikasi melalui koneksi
+      HTTPS yang aman, mencegah serangan SSL Stripping dan sniffing cookie.
+    pattern:
+      type: http_header
+      header: "Strict-Transport-Security"
+      required: true
+      recommended_value: "max-age=31536000; includeSubDomains; preload"
+      minimum_max_age: 15552000 # 180 hari
+    examples:
+      vulnerable: |
+        // Response HTTP tanpa header HSTS
+        HTTP/1.1 200 OK
+        Content-Type: text/html
+      secure: |
+        // Response HTTP dengan HSTS
+        HTTP/1.1 200 OK
+        Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    remediation: >
+      Tambahkan header Strict-Transport-Security pada web server (Nginx/Apache)
+      atau buat SecurityHeadersMiddleware di Laravel:
+      $response->headers->set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Content-Security-Policy (CSP)
+  # ---------------------------------------------------------------------------
+  - id: HDR-002
+    name: "Missing Content-Security-Policy Header (CSP)"
+    severity: high
+    confidence: high
+    scanner: headers
+    description: >
+      Header Content-Security-Policy (CSP) tidak ditemukan.
+      CSP membatasi sumber script, stylesheet, gambar, dan media yang boleh dimuat
+      oleh browser, memberikan lapisan pertahanan kedua yang sangat efektif
+      terhadap serangan Cross-Site Scripting (XSS) dan data injection.
+    pattern:
+      type: http_header
+      header: "Content-Security-Policy"
+      required: true
+      disallowed_directives:
+        - "unsafe-inline" # Jika tidak menggunakan nonce/hash
+        - "unsafe-eval"
+    examples:
+      vulnerable: |
+        HTTP/1.1 200 OK
+        // Tidak ada header Content-Security-Policy
+      secure: |
+        HTTP/1.1 200 OK
+        Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-...'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;
+    remediation: >
+      Konfigurasikan CSP header. Untuk Laravel, Anda dapat menggunakan package
+      spatie/laravel-csp atau menambahkan header via middleware:
+      $response->headers->set('Content-Security-Policy', "default-src 'self'; script-src 'self'; object-src 'none';");
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: X-Frame-Options (Clickjacking Protection)
+  # ---------------------------------------------------------------------------
+  - id: HDR-003
+    name: "Missing X-Frame-Options Header (Clickjacking)"
+    severity: high
+    confidence: high
+    scanner: headers
+    description: >
+      Header X-Frame-Options tidak ditemukan.
+      Header ini mencegah halaman web dimuat di dalam <frame>, <iframe>, <embed>,
+      atau <object> pada situs lain, melindungi pengguna dari serangan Clickjacking
+      (UI Redressing).
+    pattern:
+      type: http_header
+      header: "X-Frame-Options"
+      required: true
+      valid_values:
+        - "DENY"
+        - "SAMEORIGIN"
+    examples:
+      vulnerable: |
+        HTTP/1.1 200 OK
+        // Tidak ada X-Frame-Options
+      secure: |
+        HTTP/1.1 200 OK
+        X-Frame-Options: SAMEORIGIN
+    remediation: >
+      Tambahkan header `X-Frame-Options: SAMEORIGIN` atau `DENY` pada setiap
+      respon HTTP via middleware atau konfigurasi web server (Nginx: `add_header X-Frame-Options "SAMEORIGIN" always;`).
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: X-Content-Type-Options (MIME-Sniffing)
+  # ---------------------------------------------------------------------------
+  - id: HDR-004
+    name: "Missing X-Content-Type-Options Header"
+    severity: medium
+    confidence: high
+    scanner: headers
+    description: >
+      Header X-Content-Type-Options tidak bernilai 'nosniff'.
+      Header ini mencegah browser mencoba menebak tipe konten (MIME sniffing)
+      di luar apa yang dinyatakan pada Content-Type header. Tanpa header ini,
+      file unggahan pengguna (misal file .txt atau .jpg) bisa dieksekusi sebagai
+      HTML/JavaScript jika berisi markup.
+    pattern:
+      type: http_header
+      header: "X-Content-Type-Options"
+      required: true
+      valid_values:
+        - "nosniff"
+    examples:
+      vulnerable: |
+        HTTP/1.1 200 OK
+        // Tidak ada X-Content-Type-Options
+      secure: |
+        HTTP/1.1 200 OK
+        X-Content-Type-Options: nosniff
+    remediation: >
+      Tambahkan header `X-Content-Type-Options: nosniff` pada semua respon web.
+      Nginx: `add_header X-Content-Type-Options "nosniff" always;`.
+
+  # ---------------------------------------------------------------------------
+  # RULE 5: Referrer-Policy
+  # ---------------------------------------------------------------------------
+  - id: HDR-005
+    name: "Missing or Insecure Referrer-Policy Header"
+    severity: medium
+    confidence: high
+    scanner: headers
+    description: >
+      Header Referrer-Policy tidak ditemukan atau disetel ke 'unsafe-url'.
+      Header ini mengontrol seberapa banyak informasi referer (URL sumber)
+      yang dikirimkan browser saat menavigasi ke luar situs, mencegah
+      kebocoran ID, token, atau informasi sensitif di URL.
+    pattern:
+      type: http_header
+      header: "Referrer-Policy"
+      required: true
+      valid_values:
+        - "strict-origin-when-cross-origin"
+        - "no-referrer"
+        - "no-referrer-when-downgrade"
+        - "same-origin"
+    examples:
+      vulnerable: |
+        Referrer-Policy: unsafe-url
+      secure: |
+        Referrer-Policy: strict-origin-when-cross-origin
+    remediation: >
+      Setel header `Referrer-Policy: strict-origin-when-cross-origin`.
+
+  # ---------------------------------------------------------------------------
+  # RULE 6: Permissions-Policy
+  # ---------------------------------------------------------------------------
+  - id: HDR-006
+    name: "Missing Permissions-Policy Header"
+    severity: low
+    confidence: medium
+    scanner: headers
+    description: >
+      Header Permissions-Policy (sebelumnya Feature-Policy) tidak ditemukan.
+      Header ini membatasi akses API browser perangkat seperti kamera, mikrofon,
+      geolocation, dan payment request.
+    pattern:
+      type: http_header
+      header: "Permissions-Policy"
+      required: false
+      recommended_value: "camera=(), microphone=(), geolocation=()"
+    examples:
+      vulnerable: |
+        // Tidak ada Permissions-Policy
+      secure: |
+        Permissions-Policy: camera=(), microphone=(), geolocation=()
+    remediation: >
+      Tambahkan header `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+      jika aplikasi tidak memerlukan fitur hardware tersebut.

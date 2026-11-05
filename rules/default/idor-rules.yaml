@@ -1,0 +1,255 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: IDOR (Insecure Direct Object Reference)
+# =============================================================================
+# Referensi: OWASP API Security Top 10 — A01:2023 Broken Object Level Authorization
+# CWE: CWE-639 (Authorization Bypass Through User-Controlled Key)
+# =============================================================================
+
+meta:
+  id: idor
+  name: "IDOR & Missing Authorization"
+  version: "1.0.0"
+  category: idor
+  owasp: "A01:2023 Broken Access Control"
+  cwe: "CWE-639"
+  description: >
+    Aturan ini mendeteksi potensi celah IDOR (Insecure Direct Object Reference)
+    dan otorisasi yang hilang pada controller Laravel. IDOR terjadi ketika
+    penyerang dapat mengakses atau memodifikasi resource milik pengguna lain
+    hanya dengan mengubah ID di URL atau parameter request.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: Route model binding tanpa Policy atau Gate check
+  # ---------------------------------------------------------------------------
+  - id: IDOR-001
+    name: "Route Model Binding Without Authorization"
+    severity: critical
+    confidence: high
+    scanner: controller
+    description: >
+      Controller method menerima model melalui Route Model Binding
+      (type-hinted parameter) tetapi tidak melakukan pengecekan otorisasi
+      menggunakan Policy ($this->authorize()), Gate::allows(), atau
+      middleware 'can:'. Penyerang bisa mengakses resource milik user lain
+      hanya dengan mengubah ID di URL.
+    pattern:
+      type: php_method
+      context: controller
+      has_model_parameter: true
+      missing_calls:
+        - "$this->authorize"
+        - "Gate::allows"
+        - "Gate::denies"
+        - "Gate::check"
+        - "Gate::authorize"
+        - "$user->can("
+        - "$user->cannot("
+        - "abort_if"
+        - "abort_unless"
+        - "$this->middleware('can:"
+        - "auth()->user()->can("
+        - "Policy"
+    examples:
+      vulnerable: |
+        // routes/web.php
+        Route::get('/berita/{berita}/edit', [BeritaController::class, 'edit']);
+
+        // Controller — tidak ada pengecekan otorisasi
+        public function edit(Berita $berita)
+        {
+            return view('berita.edit', compact('berita')); // ❌ IDOR!
+        }
+      secure: |
+        // Dengan Policy
+        public function edit(Berita $berita)
+        {
+            $this->authorize('update', $berita); // ✅ Cek otorisasi
+            return view('berita.edit', compact('berita'));
+        }
+
+        // Atau dengan Gate
+        public function edit(Berita $berita)
+        {
+            Gate::authorize('update-berita', $berita); // ✅
+            return view('berita.edit', compact('berita'));
+        }
+
+        // Atau dengan abort_unless
+        public function edit(Berita $berita)
+        {
+            abort_unless(auth()->user()->can('update', $berita), 403); // ✅
+            return view('berita.edit', compact('berita'));
+        }
+    remediation: >
+      Buat Policy class untuk model terkait (php artisan make:policy BeritaPolicy --model=Berita)
+      lalu daftarkan di AuthServiceProvider. Gunakan $this->authorize('action', $model)
+      di setiap method controller yang mengakses resource spesifik.
+      Alternatif: gunakan middleware 'can:update,berita' pada route.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Load model by ID tanpa ownership check
+  # ---------------------------------------------------------------------------
+  - id: IDOR-002
+    name: "Model Find Without Ownership Check"
+    severity: high
+    confidence: medium
+    scanner: controller
+    description: >
+      Controller mengambil model menggunakan Model::find($id),
+      Model::findOrFail($id), atau Model::where('id', $id) tetapi tidak
+      memeriksa apakah resource tersebut milik user yang sedang login.
+      Seharusnya ada pengecekan auth()->id() === $model->user_id atau
+      query di-scope ke user yang login.
+    pattern:
+      type: php_method_call
+      context: controller
+      chain:
+        - object: "Model"
+          methods: ["find", "findOrFail", "where"]
+          argument_source: "request_or_route_param"
+      missing_after:
+        - "auth()->id()"
+        - "auth()->user()->id"
+        - "->where('user_id', auth()"
+        - "$this->authorize"
+        - "Gate::"
+        - "abort_if"
+        - "abort_unless"
+    examples:
+      vulnerable: |
+        public function show($id)
+        {
+            $order = Order::findOrFail($id); // ❌ Siapapun bisa akses
+            return view('orders.show', compact('order'));
+        }
+      secure: |
+        // Opsi 1: Scope query ke user login
+        public function show($id)
+        {
+            $order = auth()->user()->orders()->findOrFail($id); // ✅ Otomatis ownership
+            return view('orders.show', compact('order'));
+        }
+
+        // Opsi 2: Cek manual
+        public function show($id)
+        {
+            $order = Order::findOrFail($id);
+            abort_if($order->user_id !== auth()->id(), 403); // ✅ Ownership check
+            return view('orders.show', compact('order'));
+        }
+
+        // Opsi 3: Policy
+        public function show(Order $order)
+        {
+            $this->authorize('view', $order); // ✅ Policy check
+            return view('orders.show', compact('order'));
+        }
+    remediation: >
+      Gunakan salah satu pendekatan berikut:
+      1. Scope query: auth()->user()->model()->findOrFail($id)
+      2. Manual check: abort_if($model->user_id !== auth()->id(), 403)
+      3. Policy: $this->authorize('view', $model)
+      Pendekatan Policy adalah yang paling direkomendasikan karena terpusat
+      dan mudah di-test.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Resource Controller tanpa authorizeResource()
+  # ---------------------------------------------------------------------------
+  - id: IDOR-003
+    name: "Resource Controller Without authorizeResource"
+    severity: high
+    confidence: medium
+    scanner: controller
+    description: >
+      Resource controller (yang memiliki method index, create, store, show,
+      edit, update, destroy) tidak memanggil $this->authorizeResource() di
+      constructor. Method ini otomatis menghubungkan setiap CRUD action
+      dengan Policy method yang sesuai.
+    pattern:
+      type: php_class
+      context: resource_controller
+      has_methods:
+        any_of: ["index", "show", "edit", "update", "destroy", "store"]
+      missing_in_constructor:
+        - "$this->authorizeResource"
+      missing_middleware:
+        - "can:"
+        - "auth"
+    examples:
+      vulnerable: |
+        class BeritaController extends Controller
+        {
+            // ❌ Tidak ada authorizeResource di constructor
+            public function index() { /* ... */ }
+            public function show(Berita $berita) { /* ... */ }
+            public function edit(Berita $berita) { /* ... */ }
+            public function update(Request $request, Berita $berita) { /* ... */ }
+            public function destroy(Berita $berita) { /* ... */ }
+        }
+      secure: |
+        class BeritaController extends Controller
+        {
+            public function __construct()
+            {
+                $this->authorizeResource(Berita::class, 'berita'); // ✅
+            }
+
+            public function index() { /* ... */ }
+            public function show(Berita $berita) { /* ... */ }
+            public function edit(Berita $berita) { /* ... */ }
+            public function update(Request $request, Berita $berita) { /* ... */ }
+            public function destroy(Berita $berita) { /* ... */ }
+        }
+    remediation: >
+      Tambahkan $this->authorizeResource(ModelClass::class, 'routeParam')
+      di constructor controller. Pastikan Policy sudah dibuat dan didaftarkan
+      di AuthServiceProvider. Jika menggunakan Laravel 11+, Policy akan
+      otomatis terdeteksi jika mengikuti konvensi penamaan.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: Delete/update tanpa ownership check
+  # ---------------------------------------------------------------------------
+  - id: IDOR-004
+    name: "Destructive Action Without Authorization"
+    severity: critical
+    confidence: high
+    scanner: controller
+    description: >
+      Controller melakukan aksi destruktif (delete, update, forceDelete)
+      pada model tanpa pengecekan otorisasi. Penyerang bisa menghapus
+      atau memodifikasi data milik pengguna lain.
+    pattern:
+      type: php_method_call
+      context: controller
+      chain:
+        - object: "$model|Model"
+          methods: ["delete", "forceDelete", "update", "save"]
+      method_context:
+        names: ["destroy", "delete", "update", "remove"]
+      missing_before:
+        - "$this->authorize"
+        - "Gate::"
+        - "abort_if"
+        - "abort_unless"
+        - "->where('user_id'"
+    examples:
+      vulnerable: |
+        public function destroy($id)
+        {
+            $post = Post::findOrFail($id);
+            $post->delete(); // ❌ Siapapun bisa hapus!
+            return redirect()->back();
+        }
+      secure: |
+        public function destroy(Post $post)
+        {
+            $this->authorize('delete', $post); // ✅ Policy check
+            $post->delete();
+            return redirect()->back()->with('success', 'Post dihapus.');
+        }
+    remediation: >
+      Selalu tambahkan $this->authorize('delete', $model) atau
+      abort_unless(auth()->user()->can('delete', $model), 403) sebelum
+      melakukan aksi destruktif. Buat Policy yang mendefinisikan siapa
+      yang boleh menghapus resource tersebut.

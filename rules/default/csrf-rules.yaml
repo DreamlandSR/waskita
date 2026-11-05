@@ -1,0 +1,177 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: Cross-Site Request Forgery (CSRF)
+# =============================================================================
+# Referensi: OWASP Top 10 — A01:2021 Broken Access Control
+# CWE: CWE-352 (Cross-Site Request Forgery)
+# =============================================================================
+
+meta:
+  id: csrf
+  name: "Cross-Site Request Forgery (CSRF)"
+  version: "1.0.0"
+  category: csrf
+  owasp: "A01:2021 Broken Access Control"
+  cwe: "CWE-352"
+  description: >
+    Aturan ini memeriksa konfigurasi CSRF pada aplikasi Laravel.
+    Laravel menyediakan proteksi CSRF secara default melalui middleware
+    VerifyCsrfToken / ValidateCsrfToken. Pengecualian yang terlalu longgar
+    atau form Blade tanpa token CSRF membuka celah serangan CSRF.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: VerifyCsrfToken $except list berisi wildcard '*'
+  # ---------------------------------------------------------------------------
+  - id: CSRF-001
+    name: "CSRF Protection Disabled Globally via Wildcard"
+    severity: critical
+    confidence: high
+    scanner: middleware
+    description: >
+      Middleware VerifyCsrfToken (atau ValidateCsrfToken) memiliki wildcard '*'
+      di dalam array $except. Ini menonaktifkan proteksi CSRF untuk SELURUH
+      rute di aplikasi, membuat semua form dan aksi POST/PUT/DELETE rentan
+      terhadap serangan Cross-Site Request Forgery.
+    pattern:
+      type: php_property
+      class_extends:
+        - "Illuminate\\Foundation\\Http\\Middleware\\VerifyCsrfToken"
+        - "Illuminate\\Foundation\\Http\\Middleware\\ValidateCsrfToken"
+      property: "except"
+      contains_any:
+        - "'*'"
+        - '"*"'
+        - "/*"
+        - "api/*" # Jika api/* ada di web middleware group
+    examples:
+      vulnerable: |
+        // app/Http/Middleware/VerifyCsrfToken.php
+        class VerifyCsrfToken extends Middleware
+        {
+            protected $except = [
+                '*', // ❌ SANGAT BERBAHAYA — CSRF mati total!
+            ];
+        }
+      secure: |
+        class VerifyCsrfToken extends Middleware
+        {
+            protected $except = [
+                'stripe/*',      // ✅ Webhook pihak ketiga yang valid
+                'midtrans/hook', // ✅ Webhook pembayaran dengan signature check
+            ];
+        }
+    remediation: >
+      Hapus wildcard '*' dari array $except. Hanya kecualikan endpoint webhook
+      pihak ketiga (seperti Stripe, Midtrans, Xendit) yang memang tidak bisa
+      mengirimkan CSRF token Laravel. Pastikan webhook tersebut memiliki
+      mekanisme verifikasi signature sendiri (misal: webhook secret / HMAC).
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Rute sensitif dikecualikan dari proteksi CSRF
+  # ---------------------------------------------------------------------------
+  - id: CSRF-002
+    name: "Sensitive Routes Excluded from CSRF Protection"
+    severity: high
+    confidence: high
+    scanner: middleware
+    description: >
+      Array $except pada middleware CSRF mengecualikan rute-rute sensitif
+      seperti login, register, password reset, checkout, user profile,
+      atau rute administratif. Penyerang bisa memalsukan request atas nama
+      pengguna yang sedang login.
+    pattern:
+      type: php_property
+      class_extends:
+        - "Illuminate\\Foundation\\Http\\Middleware\\VerifyCsrfToken"
+        - "Illuminate\\Foundation\\Http\\Middleware\\ValidateCsrfToken"
+      property: "except"
+      contains_sensitive_patterns:
+        - "login"
+        - "register"
+        - "password"
+        - "reset"
+        - "user"
+        - "admin"
+        - "profile"
+        - "account"
+        - "delete"
+        - "update"
+        - "checkout"
+        - "cart"
+        - "transfer"
+        - "settings"
+    examples:
+      vulnerable: |
+        class VerifyCsrfToken extends Middleware
+        {
+            protected $except = [
+                'login',             // ❌ Login CSRF — penyerang bisa login korban ke akun attacker
+                'password/reset',    // ❌ Reset password tanpa CSRF
+                'admin/*',           // ❌ Rute admin tanpa CSRF!
+                'user/update-email', // ❌ Pengubahan email tanpa CSRF
+            ];
+        }
+      secure: |
+        class VerifyCsrfToken extends Middleware
+        {
+            // Rute aplikasi web HARUS selalu dilindungi CSRF
+            protected $except = [
+                // Hanya webhook eksternal:
+                'webhook/midtrans',
+            ];
+        }
+    remediation: >
+      Hapus rute-rute sensitif pengguna dan admin dari array $except.
+      Untuk API murni, gunakan file routes/api.php yang secara arsitektur
+      tidak menggunakan session/cookie melainkan token (Sanctum/Passport).
+      Jangan menonaktifkan CSRF pada routes/web.php.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Form HTML/Blade POST/PUT/PATCH/DELETE tanpa directive @csrf
+  # ---------------------------------------------------------------------------
+  - id: CSRF-003
+    name: "Blade Form Missing @csrf Directive"
+    severity: high
+    confidence: high
+    scanner: blade
+    description: >
+      Ditemukan tag <form> dengan method POST, PUT, PATCH, atau DELETE pada file
+      Blade yang tidak menyertakan directive @csrf atau {{ csrf_field() }}.
+      Form ini akan menghasilkan error 419 Page Expired atau lebih buruk lagi,
+      jika CSRF dimatikan, rentan terhadap serangan CSRF.
+    pattern:
+      type: blade_tag
+      tag: "form"
+      attributes:
+        method_not_in: ["GET", "get"]
+      missing_within_form:
+        - "@csrf"
+        - "csrf_field()"
+        - "csrf_token()"
+        - "name=\"_token\""
+        - "name='_token'"
+    examples:
+      vulnerable: |
+        {{-- ❌ BERBAHAYA / ERROR 419 --}}
+        <form action="/profil/update" method="POST">
+            <input type="text" name="name" value="{{ $user->name }}">
+            <button type="submit">Simpan</button>
+        </form>
+      secure: |
+        {{-- ✅ AMAN --}}
+        <form action="/profil/update" method="POST">
+            @csrf
+            <input type="text" name="name" value="{{ $user->name }}">
+            <button type="submit">Simpan</button>
+        </form>
+
+        {{-- ✅ AMAN (dengan method spoofing) --}}
+        <form action="/berita/1" method="POST">
+            @csrf
+            @method('DELETE')
+            <button type="submit">Hapus</button>
+        </form>
+    remediation: >
+      Tambahkan directive @csrf tepat setelah pembuka tag <form>.
+      Jika form menggunakan AJAX, sertakan X-CSRF-TOKEN header dari
+      meta tag: <meta name="csrf-token" content="{{ csrf_token() }}">.

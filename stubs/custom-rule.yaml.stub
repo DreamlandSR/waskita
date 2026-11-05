@@ -1,0 +1,102 @@
+# =============================================================================
+# Waskita — Template Aturan Keamanan Kustom
+# =============================================================================
+# Salin file ini ke folder `rules/custom/` di proyek Anda,
+# lalu ubah sesuai kebutuhan. Waskita akan otomatis
+# membaca semua file *.yaml di folder tersebut.
+# =============================================================================
+
+meta:
+  id: custom-rule-example                # ID unik untuk rule set (tanpa spasi)
+  name: "Custom Security Rule Template"  # Nama yang tampil di laporan
+  version: "1.0.0"                       # Versi aturan Anda
+  category: custom                       # Kategori: mass-assignment, idor, xss, sqli, csrf, env, headers, ratelimit, custom
+  description: >
+    Deskripsi aturan Anda di sini. Jelaskan apa yang diperiksa,
+    mengapa penting, dan dalam konteks proyek mana aturan ini relevan.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # Contoh Rule 1: [Ganti dengan nama rule Anda]
+  # ---------------------------------------------------------------------------
+  - id: CUSTOM-001                       # ID unik rule (format: KATEGORI-NNN)
+    name: "Nama Rule Anda"               # Nama singkat
+    severity: high                       # Pilihan: critical, high, medium, low, info
+    confidence: medium                   # Seberapa yakin deteksi ini: high, medium, low
+    scanner: controller                  # Scanner: model, controller, blade, route, env, config, middleware, source_code, headers, filesystem
+    description: >
+      Jelaskan secara detail apa yang diperiksa dan mengapa ini merupakan
+      masalah keamanan. Sertakan konteks bisnis jika relevan.
+
+    pattern:
+      # Pilih salah satu tipe pola:
+      #
+      # Tipe 1: Properti PHP pada class
+      # type: php_property
+      # class_extends: "App\\Models\\Model"
+      # property: "fillable"
+      # contains_any: ["role", "is_admin"]
+      #
+      # Tipe 2: Pemanggilan method
+      # type: php_method_call
+      # context: controller
+      # chain:
+      #   - object: "Model"
+      #     methods: ["create", "update"]
+      #   - argument_contains: ["$request->all()"]
+      #
+      # Tipe 3: Blade template
+      # type: blade_echo
+      # syntax: "unescaped"  # atau "escaped"
+      # contains_any: ["request(", "$_GET"]
+      #
+      # Tipe 4: Route definition
+      # type: route_definition
+      # methods: ["POST"]
+      # uri_patterns: ["login", "register"]
+      # missing_middleware: ["throttle"]
+      #
+      # Tipe 5: Environment variable
+      # type: env_pair_condition
+      # conditions:
+      #   - key: "APP_DEBUG"
+      #     match: ["true"]
+      #
+      # Tipe 6: HTTP header
+      # type: http_header
+      # header: "X-Frame-Options"
+      # required: true
+      #
+      type: php_method_call
+      context: controller
+      chain:
+        - object: "Model"
+          methods: ["create"]
+        - argument_contains:
+            - "$request->all()"
+
+    examples:
+      vulnerable: |
+        // Kode yang RENTAN (contoh)
+        public function store(Request $request)
+        {
+            Model::create($request->all()); // ❌ Rentan
+        }
+      secure: |
+        // Kode yang AMAN (contoh perbaikan)
+        public function store(StoreRequest $request)
+        {
+            Model::create($request->validated()); // ✅ Aman
+        }
+
+    remediation: >
+      Jelaskan langkah-langkah perbaikan secara detail, termasuk perintah
+      artisan jika ada, contoh kode, atau package yang perlu diinstal.
+
+  # ---------------------------------------------------------------------------
+  # Tambahkan rule berikutnya di bawah ini...
+  # ---------------------------------------------------------------------------
+  # - id: CUSTOM-002
+  #   name: "Rule Kedua"
+  #   severity: medium
+  #   ...

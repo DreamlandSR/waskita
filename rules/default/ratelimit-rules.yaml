@@ -1,0 +1,168 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: Rate Limiting & Brute-Force Protection
+# =============================================================================
+# Referensi: OWASP Top 10 — A07:2021 Identification and Authentication Failures
+# CWE: CWE-307 (Improper Restriction of Excessive Authentication Attempts)
+# =============================================================================
+
+meta:
+  id: rate-limiting
+  name: "Rate Limiting & Brute-Force Protection"
+  version: "1.0.0"
+  category: ratelimit
+  owasp: "A07:2021 Identification and Authentication Failures"
+  cwe: "CWE-307"
+  description: >
+    Aturan ini mendeteksi rute-rute otentikasi dan aksi sensitif yang tidak
+    dilindungi oleh middleware rate limiting (throttle). Tanpa rate limiting,
+    penyerang dapat melakukan serangan brute-force password, credential stuffing,
+    dan SMS/email flooding DoS.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: Rute Login Tanpa Throttle Middleware
+  # ---------------------------------------------------------------------------
+  - id: RATE-001
+    name: "Login Route Missing Throttle Middleware"
+    severity: high
+    confidence: high
+    scanner: route
+    description: >
+      Rute login (POST /login, /admin/login, /masuk) tidak menggunakan middleware
+      throttle (rate limiter). Hal ini memungkinkan penyerang mengirim ribuan
+      kombinasi username/password per menit dalam serangan Brute-Force
+      atau Credential Stuffing.
+    pattern:
+      type: route_definition
+      methods: ["POST"]
+      uri_patterns:
+        - "login"
+        - "masuk"
+        - "signin"
+        - "auth/login"
+        - "api/login"
+        - "admin/login"
+      missing_middleware:
+        - "throttle"
+        - "throttle:login"
+        - "throttle:5,1"
+        - "throttle:60,1"
+    examples:
+      vulnerable: |
+        // routes/web.php
+        Route::post('/login', [LoginController::class, 'authenticate']); // ❌ Tanpa throttle!
+      secure: |
+        // ✅ AMAN: Throttle 5 percobaan per menit
+        Route::post('/login', [LoginController::class, 'authenticate'])
+            ->middleware('throttle:5,1');
+
+        // ✅ Atau menggunakan RateLimiter khusus di AppServiceProvider
+        Route::post('/login', [LoginController::class, 'authenticate'])
+            ->middleware('throttle:login');
+    remediation: >
+      Tambahkan middleware `throttle:5,1` (maksimal 5 percobaan per menit)
+      pada rute POST login. Alternatifnya, gunakan trait `ThrottlesLogins`
+      dari Laravel UI atau implementasikan `RateLimiter::for('login', ...)`
+      di AppServiceProvider.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Rute Password Reset Tanpa Throttle Middleware
+  # ---------------------------------------------------------------------------
+  - id: RATE-002
+    name: "Password Reset Route Missing Throttle Middleware"
+    severity: high
+    confidence: high
+    scanner: route
+    description: >
+      Rute pengiriman tautan reset kata sandi (POST /forgot-password, /password/email, /lupa-password)
+      tidak dilindungi oleh middleware throttle. Penyerang dapat melakukan
+      Email Flooding (menghujani inbox korban) atau DoS pada mail server.
+    pattern:
+      type: route_definition
+      methods: ["POST"]
+      uri_patterns:
+        - "forgot-password"
+        - "password/email"
+        - "password/reset"
+        - "lupa-password"
+        - "minta-reset-sandi"
+        - "password/forgot"
+      missing_middleware:
+        - "throttle"
+        - "throttle:3,1"
+        - "throttle:6,1"
+    examples:
+      vulnerable: |
+        // ❌ Rawan email bombing
+        Route::post('/lupa-password', [ResetPasswordController::class, 'kirimTautan']);
+      secure: |
+        // ✅ Dibatasi 3 kali per menit
+        Route::post('/lupa-password', [ResetPasswordController::class, 'kirimTautan'])
+            ->middleware('throttle:3,1');
+    remediation: >
+      Tambahkan middleware `throttle:3,1` atau `throttle:6,1` pada rute POST
+      permintaan reset password untuk mencegah spamming dan resource exhaustion.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Rute Registrasi Akun Tanpa Throttle Middleware
+  # ---------------------------------------------------------------------------
+  - id: RATE-003
+    name: "Registration Route Missing Throttle Middleware"
+    severity: medium
+    confidence: high
+    scanner: route
+    description: >
+      Rute registrasi akun (POST /register, /daftar) tidak memiliki pembatasan
+      rate limit. Bot otomatis dapat membuat ribuan akun spam yang mengotori
+      database dan menghabiskan resource server.
+    pattern:
+      type: route_definition
+      methods: ["POST"]
+      uri_patterns:
+        - "register"
+        - "daftar"
+        - "signup"
+        - "auth/register"
+      missing_middleware:
+        - "throttle"
+    examples:
+      vulnerable: |
+        Route::post('/register', [RegisterController::class, 'store']); // ❌
+      secure: |
+        Route::post('/register', [RegisterController::class, 'store'])
+            ->middleware('throttle:10,1'); // ✅ Maksimal 10 pendaftaran/menit
+    remediation: >
+      Tambahkan middleware `throttle:10,1` pada rute registrasi. Pertimbangkan
+      juga untuk mengintegrasikan CAPTCHA (seperti Cloudflare Turnstile)
+      pada form pendaftaran.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: API Endpoints Tanpa Rate Limiter Global
+  # ---------------------------------------------------------------------------
+  - id: RATE-004
+    name: "API Route Group Missing Rate Limiter"
+    severity: medium
+    confidence: medium
+    scanner: route
+    description: >
+      Grup rute API (routes/api.php) tidak memiliki middleware throttle:api
+      secara keseluruhan. Ini membuka peluang DoS (Denial of Service) terhadap
+      endpoint API publik atau private.
+    pattern:
+      type: route_group
+      file: "routes/api.php"
+      missing_group_middleware:
+        - "throttle:api"
+        - "throttle"
+    examples:
+      vulnerable: |
+        // routes/api.php tanpa rate limiting
+        Route::get('/berita', [ApiBeritaController::class, 'index']);
+      secure: |
+        // Default Laravel 11/10 routes/api.php terbungkus middleware 'api' yang memuat throttle:api
+        Route::middleware(['api', 'throttle:api'])->group(function () {
+            Route::get('/berita', [ApiBeritaController::class, 'index']);
+        });
+    remediation: >
+      Pastikan grup middleware 'api' di Kernel.php (Laravel <=10) atau bootstrap/app.php (Laravel 11+)
+      mencakup `throttle:api` dengan limit wajar (misal 60 request per menit).

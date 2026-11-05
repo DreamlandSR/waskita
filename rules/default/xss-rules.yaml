@@ -1,0 +1,222 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: Cross-Site Scripting (XSS)
+# =============================================================================
+# Referensi: OWASP Top 10 — A03:2021 Injection
+# CWE: CWE-79 (Improper Neutralization of Input During Web Page Generation)
+# =============================================================================
+
+meta:
+  id: xss
+  name: "Cross-Site Scripting (XSS)"
+  version: "1.0.0"
+  category: xss
+  owasp: "A03:2021 Injection"
+  cwe: "CWE-79"
+  description: >
+    Aturan ini mendeteksi potensi celah XSS pada template Blade dan controller.
+    Laravel melindungi dari XSS secara default melalui {{ }} (escaped output),
+    namun penggunaan {!! !!} (unescaped output) membuka celah XSS jika data
+    tidak di-sanitasi terlebih dahulu.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: Unescaped output {!! !!} tanpa sanitasi
+  # ---------------------------------------------------------------------------
+  - id: XSS-001
+    name: "Unescaped Blade Output Without Sanitizer"
+    severity: high
+    confidence: high
+    scanner: blade
+    description: >
+      Template Blade menggunakan {!! $variable !!} untuk menampilkan data
+      tanpa escaping. Jika variabel tersebut berisi input dari pengguna,
+      penyerang bisa menyisipkan script berbahaya (XSS).
+      Data harus di-sanitasi menggunakan Purifier::clean() atau e() terlebih dahulu.
+    pattern:
+      type: blade_echo
+      syntax: "unescaped"  # {!! ... !!}
+      variable_not_wrapped_by:
+        - "Purifier::clean"
+        - "clean("
+        - "e("
+        - "htmlspecialchars("
+        - "htmlentities("
+        - "strip_tags("
+        - "Str::limit("
+        - "nl2br(e("
+      exclude_safe_content:
+        - "$__env"
+        - "@yield"
+        - "@section"
+        - "csrf_field()"
+        - "csrf_token()"
+        - "method_field("
+        - "app("
+        - "config("
+        - "asset("
+        - "url("
+        - "route("
+    examples:
+      vulnerable: |
+        {{-- ❌ BERBAHAYA — data user langsung ditampilkan --}}
+        <div class="content">{!! $berita->konten !!}</div>
+        <p>{!! $komentar->isi !!}</p>
+      secure: |
+        {{-- ✅ AMAN — menggunakan HTMLPurifier --}}
+        <div class="content">{!! Purifier::clean($berita->konten) !!}</div>
+
+        {{-- ✅ AMAN — menggunakan e() (full escape) --}}
+        <p>{!! nl2br(e($komentar->isi)) !!}</p>
+
+        {{-- ✅ PALING AMAN — gunakan {{ }} (auto-escaped) --}}
+        <p>{{ $komentar->isi }}</p>
+    remediation: >
+      Gunakan {{ }} (double curly braces) yang otomatis melakukan escaping.
+      Jika memang perlu menampilkan HTML (misalnya konten WYSIWYG),
+      gunakan package HTMLPurifier (mews/purifier) dan bungkus output:
+      {!! Purifier::clean($content) !!}. Install via: composer require mews/purifier
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Input request langsung di dalam unescaped blade
+  # ---------------------------------------------------------------------------
+  - id: XSS-002
+    name: "Direct Request Input in Unescaped Blade"
+    severity: critical
+    confidence: high
+    scanner: blade
+    description: >
+      Template Blade menampilkan input dari request langsung di dalam
+      {!! !!} tanpa sanitasi. Ini adalah celah Reflected XSS yang sangat
+      berbahaya karena penyerang bisa membuat URL jahat yang mengeksekusi
+      JavaScript di browser korban.
+    pattern:
+      type: blade_echo
+      syntax: "unescaped"
+      contains_any:
+        - "request("
+        - "request()->"
+        - "$request->"
+        - "Request::get("
+        - "Request::input("
+        - "$_GET"
+        - "$_POST"
+        - "$_REQUEST"
+        - "old("
+    examples:
+      vulnerable: |
+        {{-- ❌ SANGAT BERBAHAYA — Reflected XSS --}}
+        <input type="text" value="{!! request('search') !!}">
+        <h1>Hasil pencarian: {!! request()->input('q') !!}</h1>
+      secure: |
+        {{-- ✅ AMAN — gunakan {{ }} --}}
+        <input type="text" value="{{ request('search') }}">
+        <h1>Hasil pencarian: {{ request()->input('q') }}</h1>
+
+        {{-- ✅ AMAN — old() dalam {{ }} --}}
+        <input type="text" value="{{ old('search') }}">
+    remediation: >
+      JANGAN PERNAH menggunakan {!! !!} untuk menampilkan data dari request.
+      Selalu gunakan {{ }} yang otomatis melakukan htmlspecialchars().
+      Untuk input form, gunakan {{ old('field') }} untuk menampilkan
+      nilai sebelumnya dengan aman.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Atribut HTML berbahaya (onclick, javascript:)
+  # ---------------------------------------------------------------------------
+  - id: XSS-003
+    name: "Dangerous HTML Attributes with Dynamic Data"
+    severity: high
+    confidence: medium
+    scanner: blade
+    description: >
+      Template Blade menggunakan data dinamis di dalam atribut HTML yang
+      berbahaya seperti onclick, onerror, onload, atau href="javascript:...".
+      Meskipun menggunakan {{ }}, beberapa konteks atribut tetap rentan
+      terhadap XSS.
+    pattern:
+      type: blade_attribute
+      attributes:
+        - pattern: 'onclick=".*\{\{.*\}\}.*"'
+        - pattern: 'onerror=".*\{\{.*\}\}.*"'
+        - pattern: 'onload=".*\{\{.*\}\}.*"'
+        - pattern: 'onmouseover=".*\{\{.*\}\}.*"'
+        - pattern: 'onfocus=".*\{\{.*\}\}.*"'
+        - pattern: 'onsubmit=".*\{\{.*\}\}.*"'
+        - pattern: 'href="javascript:.*\{\{.*\}\}.*"'
+        - pattern: 'href="\{\{.*\}\}"'
+          context: "when_variable_may_contain_javascript_protocol"
+        - pattern: 'src="\{!!.*!!\}"'
+    examples:
+      vulnerable: |
+        {{-- ❌ BERBAHAYA — event handler dengan data dinamis --}}
+        <button onclick="doSomething('{{ $userInput }}')">Klik</button>
+
+        {{-- ❌ BERBAHAYA — href dengan javascript: protocol --}}
+        <a href="{{ $url }}">Link</a>
+        {{-- Jika $url = "javascript:alert('XSS')" → eksekusi XSS --}}
+      secure: |
+        {{-- ✅ AMAN — gunakan event listener di JavaScript terpisah --}}
+        <button data-action="{{ $userInput }}" id="safeBtn">Klik</button>
+        <script>
+            document.getElementById('safeBtn').addEventListener('click', function() {
+                doSomething(this.dataset.action);
+            });
+        </script>
+
+        {{-- ✅ AMAN — validasi URL protocol --}}
+        @if(Str::startsWith($url, ['http://', 'https://']))
+            <a href="{{ $url }}">Link</a>
+        @endif
+    remediation: >
+      Jangan masukkan data dinamis ke dalam event handler HTML (onclick, onerror, dll).
+      Gunakan data attributes + event listener di JavaScript terpisah.
+      Untuk href, validasi bahwa URL diawali http:// atau https://
+      untuk mencegah javascript: protocol injection.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: Menyimpan HTML tanpa sanitasi ke database
+  # ---------------------------------------------------------------------------
+  - id: XSS-004
+    name: "Storing Unsanitized HTML Input"
+    severity: medium
+    confidence: medium
+    scanner: controller
+    description: >
+      Controller menyimpan input HTML dari pengguna ke database tanpa
+      sanitasi (Purifier::clean, strip_tags, dll). Meskipun ini bukan
+      XSS langsung, data berbahaya akan tersimpan dan bisa memicu
+      Stored XSS saat ditampilkan.
+    pattern:
+      type: php_method_call
+      context: controller
+      detects:
+        - method_parameter_has_html_input: true
+        - no_sanitization_before_save:
+            missing_calls:
+              - "Purifier::clean"
+              - "clean("
+              - "strip_tags("
+              - "htmlspecialchars("
+              - "htmlentities("
+    examples:
+      vulnerable: |
+        public function store(Request $request)
+        {
+            $berita = new Berita();
+            $berita->konten = $request->input('konten'); // ❌ HTML mentah disimpan
+            $berita->save();
+        }
+      secure: |
+        use Mews\Purifier\Facades\Purifier;
+
+        public function store(Request $request)
+        {
+            $berita = new Berita();
+            $berita->konten = Purifier::clean($request->input('konten')); // ✅
+            $berita->save();
+        }
+    remediation: >
+      Jika field menerima HTML (WYSIWYG editor), sanitasi menggunakan
+      HTMLPurifier sebelum menyimpan ke database. Install: composer require mews/purifier.
+      Jika field tidak memerlukan HTML, gunakan strip_tags() atau simpan
+      sebagai plain text dan gunakan {{ }} saat menampilkan.

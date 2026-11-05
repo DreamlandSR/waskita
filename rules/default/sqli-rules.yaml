@@ -1,0 +1,255 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: SQL Injection
+# =============================================================================
+# Referensi: OWASP Top 10 — A03:2021 Injection
+# CWE: CWE-89 (SQL Injection)
+# =============================================================================
+
+meta:
+  id: sqli
+  name: "SQL Injection"
+  version: "1.0.0"
+  category: sqli
+  owasp: "A03:2021 Injection"
+  cwe: "CWE-89"
+  description: >
+    Aturan ini mendeteksi potensi celah SQL Injection pada kode Laravel.
+    Meskipun Eloquent ORM menggunakan prepared statements secara default,
+    penggunaan DB::raw(), whereRaw(), orderByRaw(), dan dynamic query building
+    bisa membuka celah SQL Injection jika input pengguna tidak di-sanitasi.
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: DB::raw() dengan variabel yang dikonkatenasi/interpolasi
+  # ---------------------------------------------------------------------------
+  - id: SQLI-001
+    name: "DB::raw() with Concatenated Variables"
+    severity: critical
+    confidence: high
+    scanner: source_code
+    description: >
+      Kode menggunakan DB::raw() dengan variabel PHP yang dikonkatenasi
+      atau diinterpolasi langsung ke dalam query SQL. Ini membuat query
+      rentan terhadap SQL Injection karena melewati prepared statements.
+    pattern:
+      type: php_function_call
+      functions:
+        - "DB::raw"
+        - "\\DB::raw"
+        - "Illuminate\\Support\\Facades\\DB::raw"
+      argument_pattern:
+        contains_any:
+          - variable_concatenation: true    # DB::raw('SELECT * FROM ' . $table)
+          - variable_interpolation: true    # DB::raw("SELECT * FROM {$table}")
+          - request_input: true             # DB::raw($request->input('column'))
+    examples:
+      vulnerable: |
+        // ❌ SANGAT BERBAHAYA — SQL Injection via konkatanasi
+        $results = DB::select(DB::raw('SELECT * FROM users WHERE name = "' . $name . '"'));
+
+        // ❌ BERBAHAYA — interpolasi variabel
+        $results = DB::select(DB::raw("SELECT * FROM users WHERE role = '{$role}'"));
+
+        // ❌ BERBAHAYA — variabel request langsung
+        $column = $request->input('sort_column');
+        $query->orderBy(DB::raw($column));
+      secure: |
+        // ✅ AMAN — gunakan parameter binding
+        $results = DB::select('SELECT * FROM users WHERE name = ?', [$name]);
+
+        // ✅ AMAN — gunakan Eloquent
+        $results = User::where('name', $name)->get();
+
+        // ✅ AMAN — DB::raw dengan binding
+        $results = DB::table('users')
+            ->select(DB::raw('count(*) as total'))
+            ->where('role', '=', $role)
+            ->get();
+    remediation: >
+      Jangan pernah mengkonkatenasi atau menginterpolasi variabel ke dalam
+      DB::raw(). Gunakan parameter binding (tanda ?) atau gunakan Eloquent
+      query builder yang otomatis menggunakan prepared statements.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: whereRaw/orderByRaw/havingRaw dengan input pengguna
+  # ---------------------------------------------------------------------------
+  - id: SQLI-002
+    name: "Raw Query Methods with User Input"
+    severity: critical
+    confidence: high
+    scanner: source_code
+    description: >
+      Kode menggunakan whereRaw(), orderByRaw(), havingRaw(), selectRaw(),
+      atau groupByRaw() dengan variabel yang berasal dari input pengguna
+      tanpa menggunakan parameter binding.
+    pattern:
+      type: php_method_call
+      methods:
+        - "whereRaw"
+        - "orWhereRaw"
+        - "orderByRaw"
+        - "havingRaw"
+        - "selectRaw"
+        - "groupByRaw"
+        - "joinRaw"
+      argument_pattern:
+        contains_any:
+          - variable_concatenation: true
+          - variable_interpolation: true
+          - "$request"
+          - "request("
+          - "$_GET"
+          - "$_POST"
+    examples:
+      vulnerable: |
+        // ❌ BERBAHAYA — whereRaw dengan input user
+        $search = $request->input('search');
+        $results = User::whereRaw("name LIKE '%{$search}%'")->get();
+
+        // ❌ BERBAHAYA — orderByRaw dengan input user
+        $sortColumn = $request->input('sort');
+        $results = User::orderByRaw($sortColumn)->get();
+
+        // ❌ BERBAHAYA — havingRaw dengan konkatanasi
+        $min = $request->input('min_count');
+        $results = DB::table('orders')
+            ->selectRaw('user_id, count(*) as total')
+            ->groupBy('user_id')
+            ->havingRaw('total > ' . $min)
+            ->get();
+      secure: |
+        // ✅ AMAN — whereRaw dengan parameter binding
+        $search = $request->input('search');
+        $results = User::whereRaw("name LIKE ?", ["%{$search}%"])->get();
+
+        // ✅ LEBIH AMAN — gunakan Eloquent where
+        $results = User::where('name', 'LIKE', "%{$search}%")->get();
+
+        // ✅ AMAN — havingRaw dengan binding
+        $results = DB::table('orders')
+            ->selectRaw('user_id, count(*) as total')
+            ->groupBy('user_id')
+            ->havingRaw('total > ?', [$min])
+            ->get();
+    remediation: >
+      Selalu gunakan parameter binding (parameter kedua berupa array)
+      pada method *Raw(). Contoh: whereRaw('column = ?', [$value]).
+      Lebih baik lagi, gunakan Eloquent query builder biasa yang otomatis
+      menggunakan prepared statements.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: Dynamic orderBy dari request tanpa whitelist
+  # ---------------------------------------------------------------------------
+  - id: SQLI-003
+    name: "Dynamic OrderBy Without Whitelist"
+    severity: high
+    confidence: high
+    scanner: source_code
+    description: >
+      Kode menggunakan orderBy() dengan nama kolom yang langsung diambil dari
+      request input tanpa divalidasi terhadap whitelist kolom yang diizinkan.
+      Meskipun orderBy() menggunakan prepared statement untuk value, nama
+      kolom TIDAK bisa di-bind sebagai parameter — penyerang bisa menyisipkan
+      SQL Injection melalui nama kolom.
+    pattern:
+      type: php_method_call
+      methods:
+        - "orderBy"
+        - "orderByDesc"
+        - "latest"
+        - "oldest"
+      argument_source:
+        direct_from:
+          - "$request->input("
+          - "$request->get("
+          - "$request->query("
+          - "request("
+          - "$request->"
+          - "$_GET"
+      missing_validation:
+        - "in_array("
+        - "in:"
+        - "Rule::in("
+        - "match("
+        - "whitelist"
+        - "allowed"
+    examples:
+      vulnerable: |
+        // ❌ BERBAHAYA — nama kolom dari request tanpa validasi
+        $sortBy = $request->input('sort_by');
+        $direction = $request->input('direction');
+        $users = User::orderBy($sortBy, $direction)->paginate();
+
+        // Penyerang bisa mengirim:
+        // sort_by = "1; DROP TABLE users; --"
+        // sort_by = "(SELECT password FROM users LIMIT 1)"
+      secure: |
+        // ✅ AMAN — whitelist kolom yang diizinkan
+        $allowed = ['name', 'email', 'created_at', 'updated_at'];
+        $sortBy = in_array($request->input('sort_by'), $allowed)
+            ? $request->input('sort_by')
+            : 'created_at';
+        $direction = $request->input('direction') === 'asc' ? 'asc' : 'desc';
+
+        $users = User::orderBy($sortBy, $direction)->paginate();
+
+        // ✅ AMAN — validasi di FormRequest
+        public function rules()
+        {
+            return [
+                'sort_by' => ['sometimes', Rule::in(['name', 'email', 'created_at'])],
+                'direction' => ['sometimes', Rule::in(['asc', 'desc'])],
+            ];
+        }
+    remediation: >
+      Buat whitelist kolom yang diizinkan untuk sorting. Validasi input
+      menggunakan in_array() atau Rule::in() di FormRequest.
+      Untuk direction, hanya izinkan 'asc' atau 'desc'.
+      Contoh: $sortBy = in_array($input, $allowed) ? $input : 'created_at';
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: Query langsung tanpa Eloquent/Query Builder
+  # ---------------------------------------------------------------------------
+  - id: SQLI-004
+    name: "Raw SQL Query Without Binding"
+    severity: critical
+    confidence: high
+    scanner: source_code
+    description: >
+      Kode mengeksekusi query SQL mentah menggunakan DB::statement(),
+      DB::select(), DB::insert(), DB::update(), atau DB::delete() dengan
+      variabel yang dikonkatenasi langsung ke string SQL.
+    pattern:
+      type: php_function_call
+      functions:
+        - "DB::statement"
+        - "DB::select"
+        - "DB::insert"
+        - "DB::update"
+        - "DB::delete"
+        - "DB::unprepared"
+      argument_pattern:
+        contains_any:
+          - variable_concatenation: true
+          - variable_interpolation: true
+    examples:
+      vulnerable: |
+        // ❌ SANGAT BERBAHAYA
+        DB::statement("UPDATE users SET role = 'admin' WHERE id = " . $id);
+
+        // ❌ SANGAT BERBAHAYA
+        $results = DB::select("SELECT * FROM products WHERE category = '{$category}'");
+      secure: |
+        // ✅ AMAN — parameter binding
+        DB::statement("UPDATE users SET role = 'admin' WHERE id = ?", [$id]);
+
+        // ✅ AMAN — named binding
+        $results = DB::select("SELECT * FROM products WHERE category = :cat", ['cat' => $category]);
+
+        // ✅ PALING AMAN — gunakan Eloquent
+        User::where('id', $id)->update(['role' => 'admin']);
+    remediation: >
+      Gunakan parameter binding (tanda ? atau :named) pada semua raw query.
+      Lebih baik, gunakan Eloquent query builder yang otomatis aman.
+      DB::unprepared() sangat berbahaya dan sebaiknya dihindari untuk
+      query yang melibatkan data dari pengguna.

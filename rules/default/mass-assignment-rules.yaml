@@ -1,0 +1,195 @@
+# =============================================================================
+# Waskita — Aturan Keamanan: Mass Assignment
+# =============================================================================
+# Referensi: OWASP API Security Top 10 — A01:2023 Broken Object Level Authorization
+# CVE Terkait: Tidak ada CVE spesifik, namun Mass Assignment adalah vektor serangan
+#              yang sangat umum pada aplikasi Laravel.
+# =============================================================================
+
+meta:
+  id: mass-assignment
+  name: "Mass Assignment Protection"
+  version: "1.0.0"
+  category: mass-assignment
+  owasp: "API6:2023 Unrestricted Access to Sensitive Business Flows"
+  description: >
+    Aturan ini memeriksa potensi celah Mass Assignment pada model Eloquent.
+    Mass Assignment terjadi ketika penyerang mengirim parameter HTTP tambahan
+    yang tidak divalidasi, lalu langsung disimpan ke database melalui
+    Model::create(), Model::update(), atau Model::fill().
+
+rules:
+  # ---------------------------------------------------------------------------
+  # RULE 1: $guarded kosong — model terbuka sepenuhnya
+  # ---------------------------------------------------------------------------
+  - id: MA-001
+    name: "Empty Guarded Array"
+    severity: critical
+    confidence: high
+    scanner: model
+    description: >
+      Model memiliki $guarded = [] (array kosong), yang berarti SEMUA kolom
+      dapat diisi melalui mass assignment. Penyerang bisa mengubah kolom
+      sensitif seperti 'role', 'is_admin', 'email_verified_at', dll.
+    pattern:
+      type: php_property
+      class_extends: "Illuminate\\Database\\Eloquent\\Model"
+      property: "guarded"
+      match: "empty_array"  # $guarded = []
+    examples:
+      vulnerable: |
+        class User extends Model
+        {
+            protected $guarded = []; // ❌ BERBAHAYA
+        }
+      secure: |
+        class User extends Model
+        {
+            protected $fillable = ['name', 'email']; // ✅ AMAN — hanya kolom tertentu
+        }
+    remediation: >
+      Hapus $guarded = [] dan ganti dengan $fillable yang hanya berisi kolom
+      yang memang boleh diisi oleh pengguna. Jangan pernah memasukkan kolom
+      seperti 'id', 'role', 'is_admin', 'password', atau 'email_verified_at'
+      ke dalam $fillable kecuali melalui proses yang terkontrol.
+
+  # ---------------------------------------------------------------------------
+  # RULE 2: Kolom sensitif di dalam $fillable
+  # ---------------------------------------------------------------------------
+  - id: MA-002
+    name: "Sensitive Columns in Fillable"
+    severity: high
+    confidence: high
+    scanner: model
+    description: >
+      Model memiliki kolom sensitif di dalam $fillable. Kolom-kolom seperti
+      'role', 'is_admin', 'password', 'email_verified_at', 'remember_token'
+      seharusnya TIDAK boleh diisi melalui mass assignment dari request HTTP.
+    pattern:
+      type: php_property
+      class_extends: "Illuminate\\Database\\Eloquent\\Model"
+      property: "fillable"
+      contains_any:
+        - "role"
+        - "is_admin"
+        - "is_superadmin"
+        - "password"
+        - "email_verified_at"
+        - "remember_token"
+        - "api_token"
+        - "two_factor_secret"
+        - "permissions"
+        - "abilities"
+    examples:
+      vulnerable: |
+        class User extends Model
+        {
+            protected $fillable = [
+                'name', 'email', 'password', 'role', 'is_admin' // ❌ BERBAHAYA
+            ];
+        }
+      secure: |
+        class User extends Model
+        {
+            protected $fillable = ['name', 'email']; // ✅ AMAN
+
+            // Password diatur secara eksplisit melalui mutator/setter
+            public function setPasswordAttribute($value)
+            {
+                $this->attributes['password'] = bcrypt($value);
+            }
+        }
+    remediation: >
+      Hapus kolom sensitif dari $fillable. Gunakan setter/mutator eksplisit
+      untuk mengatur password. Untuk perubahan role atau is_admin, buat
+      endpoint admin terpisah yang dilindungi oleh middleware authorization.
+
+  # ---------------------------------------------------------------------------
+  # RULE 3: $request->all() digunakan dalam create/update
+  # ---------------------------------------------------------------------------
+  - id: MA-003
+    name: "Request All in Mass Assignment"
+    severity: high
+    confidence: high
+    scanner: controller
+    description: >
+      Controller menggunakan $request->all() atau request()->all() langsung
+      di dalam Model::create(), Model::update(), atau Model::fill().
+      Ini berarti SEMUA parameter dari HTTP request diteruskan ke model,
+      termasuk parameter berbahaya yang mungkin ditambahkan penyerang.
+    pattern:
+      type: php_method_call
+      context: controller
+      chain:
+        - object: "Model|$this|$model"
+          methods: ["create", "update", "fill", "insert", "forceCreate"]
+        - argument_contains:
+            - "$request->all()"
+            - "request()->all()"
+            - "Request::all()"
+            - "$request->input()"
+    examples:
+      vulnerable: |
+        public function store(Request $request)
+        {
+            $user = User::create($request->all()); // ❌ BERBAHAYA
+        }
+      secure: |
+        public function store(StoreUserRequest $request)
+        {
+            // ✅ AMAN — gunakan FormRequest dengan validasi + only()
+            $user = User::create($request->validated());
+        }
+
+        // Atau gunakan $request->only()
+        public function store(Request $request)
+        {
+            $validated = $request->validate([
+                'name' => 'required|string|max:255',
+                'email' => 'required|email|unique:users',
+            ]);
+            $user = User::create($validated); // ✅ AMAN
+        }
+    remediation: >
+      Ganti $request->all() dengan $request->validated() (jika menggunakan
+      FormRequest) atau $request->only(['field1', 'field2']). Lebih baik lagi,
+      gunakan FormRequest class terpisah dengan rules yang ketat, lalu panggil
+      $request->validated() untuk mendapatkan hanya data yang sudah divalidasi.
+
+  # ---------------------------------------------------------------------------
+  # RULE 4: Model tanpa $fillable dan tanpa $guarded
+  # ---------------------------------------------------------------------------
+  - id: MA-004
+    name: "No Fillable or Guarded Defined"
+    severity: medium
+    confidence: medium
+    scanner: model
+    description: >
+      Model Eloquent tidak mendefinisikan $fillable maupun $guarded.
+      Secara default Laravel akan memproteksi semua kolom (guarded = ['*']),
+      namun ini bisa menyebabkan error runtime yang tidak terduga.
+      Sebaiknya deklarasikan $fillable secara eksplisit.
+    pattern:
+      type: php_class
+      class_extends: "Illuminate\\Database\\Eloquent\\Model"
+      missing_properties:
+        - "fillable"
+        - "guarded"
+    examples:
+      vulnerable: |
+        class Berita extends Model
+        {
+            // Tidak ada $fillable atau $guarded — ambigu
+            use HasFactory;
+        }
+      secure: |
+        class Berita extends Model
+        {
+            use HasFactory;
+
+            protected $fillable = ['judul', 'konten', 'kategori_id']; // ✅ Eksplisit
+        }
+    remediation: >
+      Tambahkan properti $fillable dengan daftar kolom yang boleh diisi
+      melalui mass assignment. Ini membuat intent developer jelas dan
+      mencegah kekeliruan di masa depan.

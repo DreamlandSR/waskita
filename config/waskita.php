@@ -1,0 +1,144 @@
+<?php
+
+declare(strict_types=1);
+
+use Waskita\Security\Scanners\CsrfScanner;
+use Waskita\Security\Scanners\EnvironmentConfigScanner;
+use Waskita\Security\Scanners\IdorScanner;
+use Waskita\Security\Scanners\MassAssignmentScanner;
+use Waskita\Security\Scanners\RateLimitScanner;
+use Waskita\Security\Scanners\SecurityHeaderScanner;
+use Waskita\Security\Scanners\SqlInjectionScanner;
+use Waskita\Security\Scanners\XssScanner;
+
+return [
+
+    /*
+    |--------------------------------------------------------------------------
+    | Severity Threshold
+    |--------------------------------------------------------------------------
+    |
+    | The minimum severity level for findings to be included in reports.
+    | Options: 'critical', 'high', 'medium', 'low', 'info'
+    |
+    */
+
+    'severity_threshold' => env('WASKITA_SEVERITY_THRESHOLD', 'low'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Fail On Severity
+    |--------------------------------------------------------------------------
+    |
+    | If any finding meets or exceeds this severity level, the audit command
+    | will exit with code 1 (failure). Useful for CI/CD pipelines.
+    | Options: 'critical', 'high', 'medium', 'low', 'info'
+    |
+    */
+
+    'fail_on' => env('WASKITA_FAIL_ON', 'high'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Enabled Scanners
+    |--------------------------------------------------------------------------
+    |
+    | List of scanner classes to run during an audit.
+    |
+    */
+
+    'scanners' => [
+        CsrfScanner::class,
+        EnvironmentConfigScanner::class,
+        IdorScanner::class,
+        MassAssignmentScanner::class,
+        RateLimitScanner::class,
+        SecurityHeaderScanner::class,
+        SqlInjectionScanner::class,
+        XssScanner::class,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Ignored Paths
+    |--------------------------------------------------------------------------
+    |
+    | Directories that should be excluded from scanning. Paths are relative
+    | to the project root.
+    |
+    */
+
+    'ignore_paths' => [
+        'vendor',
+        'node_modules',
+        'storage',
+        'bootstrap/cache',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Custom Rules Path
+    |--------------------------------------------------------------------------
+    |
+    | Directory containing custom YAML security rule definitions.
+    | Set to null to disable custom rules.
+    |
+    */
+
+    'custom_rules_path' => function_exists('base_path') ? base_path('rules/security') : 'rules/security',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Sensitive Database Columns
+    |--------------------------------------------------------------------------
+    |
+    | Column names that should be treated as sensitive. The MassAssignment
+    | scanner will flag models exposing these columns via $fillable.
+    |
+    */
+
+    'sensitive_columns' => [
+        'role',
+        'is_admin',
+        'admin',
+        'password',
+        'remember_token',
+        'permissions',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Sensitive Route Segments
+    |--------------------------------------------------------------------------
+    |
+    | Route URI segments that indicate security-sensitive endpoints.
+    | The RouteScanner / RateLimitScanner will verify proper protection.
+    |
+    */
+
+    'sensitive_routes' => [
+        'login',
+        'masuk',
+        'password',
+        'lupa-kata-sandi',
+        'register',
+        'daftar',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Required Security Headers
+    |--------------------------------------------------------------------------
+    |
+    | HTTP response headers that must be present. The SecurityHeaderScanner
+    | checks for these and flags any that are missing.
+    |
+    */
+
+    'required_headers' => [
+        'X-Frame-Options',
+        'X-Content-Type-Options',
+        'Referrer-Policy',
+    ],
+
+];
