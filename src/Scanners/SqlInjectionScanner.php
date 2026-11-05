@@ -166,15 +166,25 @@ class SqlInjectionScanner implements ScannerInterface
 
     /**
      * Cek apakah query memiliki parameter binding sebagai argumen kedua.
-     * Contoh: whereRaw('status = ?', [$status])
+     * Contoh: whereRaw('status = ?', [$status]) atau orderByRaw($expr, $bindings)
      */
     private function hasParameterBindings(string $args): bool
     {
-        // Jika ada tanda tanya '?' di dalam string dan terdapat koma yang memisahkan argumen array
-        $hasQuestionMark = str_contains($args, '?');
+        // 1. Literal array binding: whereRaw('status = ?', [$status])
         $hasArrayBinding = (bool) preg_match('/,\s*\[/i', $args);
+        $hasQuestionMark = str_contains($args, '?') || str_contains($args, ':');
 
-        return $hasQuestionMark && $hasArrayBinding;
+        if ($hasArrayBinding && $hasQuestionMark) {
+            return true;
+        }
+
+        // 2. Variable binding sebagai argumen kedua: orderByRaw($stmt, $bindings)
+        $hasVariableBinding = (bool) preg_match('/,\s*\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*/', $args);
+        if ($hasVariableBinding) {
+            return true;
+        }
+
+        return false;
     }
 
     /**

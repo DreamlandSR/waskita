@@ -319,6 +319,70 @@ class ScannersTest extends TestCase
         $this->assertStringContainsString('Critical Issue', $output);
     }
 
+    public function test_engine_filters_waskita_ignore_annotation(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_test_' . uniqid();
+        mkdir($tempDir, 0777, true);
+
+        $testFile = $tempDir . '/test.php';
+        file_put_contents($testFile, "<?php\n// @waskita-ignore SQLI\nDB::raw(\$query);\n");
+
+        $finding = new AuditResult(
+            ruleId: 'SQLI_RAW_QUERY_CONCATENATION',
+            category: 'sql_injection',
+            severity: AuditResult::SEVERITY_CRITICAL,
+            title: 'SQL Injection',
+            description: 'Unsafe raw query',
+            file: 'test.php',
+            line: 3,
+        );
+
+        $scanner = $this->createStubScanner('SqlScanner', [$finding]);
+        $engine  = new AuditEngine([], [$scanner]);
+        $results = $engine->run($tempDir);
+
+        $this->assertSame([], $results, 'Finding should be ignored by @waskita-ignore annotation.');
+
+        unlink($testFile);
+        rmdir($tempDir);
+    }
+
+    public function test_xss_scanner_ignores_static_js_attributes(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/test.blade.php';
+        file_put_contents($bladeFile, '<button onclick="window.location.reload()">Reload</button>');
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Static onclick attribute should not be flagged as XSS.');
+
+        unlink($bladeFile);
+        rmdir($tempDir . '/resources/views');
+        rmdir($tempDir);
+    }
+
+    public function test_idor_scanner_skips_admin_controllers(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_idor_' . uniqid();
+        mkdir($tempDir . '/app/Http/Controllers', 0777, true);
+
+        $adminController = $tempDir . '/app/Http/Controllers/AdminBeritaController.php';
+        file_put_contents($adminController, "<?php\nclass AdminBeritaController {\npublic function destroy(Berita \$berita) {}\n}\n");
+
+        $scanner = new \Waskita\Security\Scanners\IdorScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Admin controller methods should not be flagged as IDOR.');
+
+        unlink($adminController);
+        rmdir($tempDir . '/app/Http/Controllers');
+        rmdir($tempDir);
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Helpers
     // ─────────────────────────────────────────────────────────────

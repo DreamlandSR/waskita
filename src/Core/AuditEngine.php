@@ -128,7 +128,99 @@ class AuditEngine
             }
         }
 
+        // Filter temuan yang ditandai dengan anotasi inline @waskita-ignore
+        $this->results = $this->filterIgnoredFindings($this->results, $normalizedBasePath);
+
         return $this->results;
+    }
+
+    /**
+     * Filter temuan yang memiliki anotasi @waskita-ignore pada baris kode atau baris sebelumnya.
+     *
+     * Format yang didukung:
+     * - // @waskita-ignore
+     * - // @waskita-ignore RULE_ID
+     * - // @waskita-ignore RULE_1, RULE_2: alasan
+     * - {{-- @waskita-ignore --}} (Blade)
+     * - /* @waskita-ignore * /
+     *
+     * @param AuditResult[] $results
+     * @return AuditResult[]
+     */
+    private function filterIgnoredFindings(array $results, string $basePath): array
+    {
+        $filtered = [];
+        $fileLinesCache = [];
+
+        foreach ($results as $result) {
+            if (! $result->file || ! $result->line) {
+                $filtered[] = $result;
+                continue;
+            }
+
+            $fullPath = $basePath . '/' . ltrim($result->file, '/');
+            if (! file_exists($fullPath)) {
+                $filtered[] = $result;
+                continue;
+            }
+
+            if (! isset($fileLinesCache[$fullPath])) {
+                $fileLinesCache[$fullPath] = file($fullPath, FILE_IGNORE_NEW_LINES) ?: [];
+            }
+
+            $lines = $fileLinesCache[$fullPath];
+            $targetLine = $result->line; // 1-based
+
+            $isIgnored = false;
+            // Periksa baris saat ini, 1 baris sebelumnya, dan 2 baris sebelumnya
+            $indicesToCheck = [
+                $targetLine - 1, // baris kode itu sendiri (0-indexed)
+                $targetLine - 2, // 1 baris sebelumnya
+                $targetLine - 3, // 2 baris sebelumnya
+            ];
+
+            foreach ($indicesToCheck as $idx) {
+                if ($idx < 0 || ! isset($lines[$idx])) {
+                    continue;
+                }
+
+                $lineContent = $lines[$idx];
+
+                if (preg_match('/@waskita-ignore(?:\s+([^:\n\r*]+))?/i', $lineContent, $matches)) {
+                    $ignoredParam = isset($matches[1]) ? trim($matches[1]) : '';
+
+                    if ($ignoredParam === '' || $ignoredParam === '--}}' || $ignoredParam === '*/') {
+                        // Blanket ignore untuk baris ini
+                        $isIgnored = true;
+                        break;
+                    }
+
+                    // Cocokkan ruleId, category, atau kata kunci
+                    $tokens = preg_split('/[\s,]+/', $ignoredParam);
+                    foreach ($tokens as $token) {
+                        $token = trim($token, " \t\n\r\0\x0B*");
+                        if ($token === '' || $token === '--}}') {
+                            continue;
+                        }
+
+                        if (
+                            str_contains(strtoupper($result->ruleId), strtoupper($token))
+                            || str_contains(strtoupper($result->category), strtoupper($token))
+                            || str_contains(strtoupper($result->title), strtoupper($token))
+                        ) {
+                            $isIgnored = true;
+                            break 2;
+                        }
+                    }
+                }
+            }
+
+            if (! $isIgnored) {
+                $filtered[] = $result;
+            }
+        }
+
+        return $filtered;
     }
 
     /**

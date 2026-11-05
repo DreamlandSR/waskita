@@ -141,4 +141,55 @@ return [
         'Referrer-Policy',
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | IDOR & Role Context Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Menyesuaikan audit IDOR dengan alur bisnis aplikasi.
+    | Controller admin dan aksi publik tidak akan disalahartikan sebagai IDOR.
+    |
+    */
+
+    'idor' => [
+        // Controller yang beroperasi dengan hak superuser/admin (wildcard * didukung)
+        'admin_controllers' => [
+            '*Admin*',
+            '*AdminController',
+            'App\\Http\\Controllers\\Admin\\*',
+        ],
+
+        // Aksi resource yang bersifat read-only untuk publik
+        'public_actions' => [
+            'show',
+            'download',
+            'preview',
+            'index',
+        ],
+
+        // Middleware penanda akses sudah dibatasi peran
+        'role_middlewares' => [
+            'admin',
+            'auth',
+            'role:*',
+            'permission:*',
+            'can:*',
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Inline Annotations (@waskita-ignore)
+    |--------------------------------------------------------------------------
+    |
+    | Mengaktifkan pembacaan komentar direktif inline seperti:
+    | // @waskita-ignore [RULE_ID]
+    | untuk mengecualikan baris kode yang sudah diverifikasi aman secara bisnis.
+    |
+    */
+
+    'ignore_annotations' => [
+        'enabled' => true,
+    ],
+
 ];

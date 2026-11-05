@@ -376,6 +376,48 @@ rules:
 
 ---
 
+## 🎯 Menyesuaikan dengan Konteks Bisnis Aplikasi
+
+Tidak semua aplikasi Laravel memiliki arsitektur yang seragam. Waskita dirancang agar dapat menyesuaikan dengan aturan bisnis Anda, bukan memaksa aturan kaku:
+
+### 1. Konfigurasi Role Context & IDOR (`config/waskita.php`)
+Secara default, Waskita memahami bahwa **Admin Controller** (seperti `AdminBeritaController`) beroperasi dengan hak superuser dan tidak memerlukan pemeriksaan kepemilikan personal. Anda dapat mengatur pemetaan controller admin dan aksi publik di `config/waskita.php`:
+
+```php
+'idor' => [
+    // Controller dengan hak superuser/admin (bebas dari warning IDOR kepemilikan)
+    'admin_controllers' => [
+        '*Admin*',
+        '*AdminController',
+        'App\Http\Controllers\Admin\*',
+    ],
+
+    // Aksi resource yang memang terbuka untuk dibaca publik
+    'public_actions' => [
+        'show',
+        'download',
+        'preview',
+        'index',
+    ],
+],
+```
+
+### 2. Pengecualian Kode Sah (`@waskita-ignore`)
+Jika ada baris kode yang sengaja ditulis untuk kebutuhan bisnis khusus dan telah diverifikasi aman, developer dapat menambahkan komentar `@waskita-ignore` tepat di baris kode atau baris sebelumnya tanpa harus mematikan rule secara global:
+
+```php
+// @waskita-ignore SQLI: Hierarki pengurus dibangun dari konstanta internal
+return $query->orderByRaw($pernyataan.' else 99 end', $bindings);
+```
+
+Atau di template Blade:
+```blade
+{{-- @waskita-ignore XSS --}}
+<div onclick="pilihFilterDropdown('kategori', '{{ $item }}')">
+```
+
+---
+
 ## 📚 Aturan Keamanan Bawaan (Default Rules)
 
 Waskita dilengkapi dengan sekumpulan aturan bawaan (*built-in*) yang mencakup spektrum kerentanan paling krusial:

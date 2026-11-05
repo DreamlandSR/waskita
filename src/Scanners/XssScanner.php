@@ -156,7 +156,8 @@ class XssScanner implements ScannerInterface
         $results = [];
 
         // Pattern 1: href="javascript:{!! ... !!}" atau href="javascript:{{ ... }}"
-        $jsHrefPattern = '/href\s*=\s*["\']javascript\s*:.*(?:\{\{.*?\}\}|\{!!.*?!!\})/si';
+        // Bounded strictly inside quotes to prevent multiline regex overrun
+        $jsHrefPattern = '/href\s*=\s*(["\'])javascript\s*:(?:(?!\1).)*(?:\{\{.*?\}\}|\{!!.*?!!\})(?:(?!\1).)*\1/i';
         if (preg_match_all($jsHrefPattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
             foreach ($matches[0] as $match) {
                 $offset = $match[1];
@@ -179,8 +180,9 @@ class XssScanner implements ScannerInterface
         }
 
         // Pattern 2: Event handler attributes (onclick, onload, dll) dengan blade echo
+        // Bounded strictly inside quotes to prevent false positives on static JavaScript
         foreach (self::DANGEROUS_ATTRIBUTES as $attr) {
-            $eventPattern = '/' . preg_quote($attr, '/') . '\s*=\s*["\'].*(?:\{\{.*?\}\}|\{!!.*?!!\})/si';
+            $eventPattern = '/' . preg_quote($attr, '/') . '\s*=\s*(["\'])(?:(?!\1).)*(?:\{\{.*?\}\}|\{!!.*?!!\})(?:(?!\1).)*\1/i';
             if (preg_match_all($eventPattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
                 foreach ($matches[0] as $match) {
                     $offset = $match[1];
