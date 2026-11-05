@@ -192,4 +192,23 @@ return [
         'enabled' => true,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Baseline Configuration (waskita-baseline.json)
+    |--------------------------------------------------------------------------
+    |
+    | Baseline mencatat seluruh temuan celah keamanan yang saat ini sudah ada
+    | ke dalam file waskita-baseline.json via perintah:
+    |   php artisan waskita:baseline
+    |
+    | Saat aktif, audit CI/CD hanya akan gagal jika ada celah keamanan BARU
+    | yang diperkenalkan setelah baseline dibuat.
+    |
+    */
+
+    'baseline' => [
+        'enabled' => true,
+        'path' => 'waskita-baseline.json',
+    ],
+
 ];

@@ -343,4 +343,16 @@ class AuditEngine
     {
         return $this->results;
     }
+
+    /**
+     * Atur ulang hasil audit (misalnya setelah difilter oleh baseline).
+     *
+     * @param AuditResult[] $results
+     */
+    public function setResults(array $results): self
+    {
+        $this->results = $results;
+
+        return $this;
+    }
 }

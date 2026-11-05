@@ -7,6 +7,7 @@ namespace Waskita\Security\Commands;
 use Illuminate\Console\Command;
 use Waskita\Security\Core\AuditEngine;
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\BaselineManager;
 use Waskita\Security\Reports\AgentReportFormatter;
 use Waskita\Security\Reports\ConsoleReportFormatter;
 use Waskita\Security\Reports\JsonReportFormatter;
@@ -26,7 +27,9 @@ class AuditCommand extends Command
         {--format=table : Output format (table, json, agent)}
         {--output= : Save output to file}
         {--fail-on=high : Fail with exit code 1 if findings reach this severity}
-        {--scanner= : Run only a specific scanner (name or class fragment)}';
+        {--scanner= : Run only a specific scanner (name or class fragment)}
+        {--baseline= : Path to baseline file to suppress existing findings (default: waskita-baseline.json)}
+        {--no-baseline : Ignore baseline file and evaluate all findings}';
 
     /** @var string */
     protected $description = 'Run comprehensive security audit on Laravel application';
@@ -55,8 +58,27 @@ class AuditCommand extends Command
         // ── Run the audit ────────────────────────────────────────
         $startTime = microtime(true);
 
-        $basePath = (string) base_path();
+        $basePath = \function_exists('base_path') ? (string) \base_path() : (string) getcwd();
         $engine->run($basePath, $scannerFilter);
+
+        // ── Apply Baseline Filtering ─────────────────────────────
+        $baselineManager = new BaselineManager();
+        $useBaseline = ! $this->option('no-baseline') && (bool) config('waskita.baseline.enabled', true);
+        $baselineConfigPath = (string) config('waskita.baseline.path', BaselineManager::DEFAULT_FILENAME);
+        $baselinePath = $this->option('baseline')
+            ? (string) $this->option('baseline')
+            : $basePath . '/' . ltrim($baselineConfigPath, '/');
+
+        if (! str_starts_with($baselinePath, '/') && ! preg_match('/^[A-Z]:[\\\\\/]/i', $baselinePath)) {
+            $baselinePath = $basePath . '/' . ltrim($baselinePath, '/');
+        }
+
+        $suppressedCount = 0;
+        if ($useBaseline && file_exists($baselinePath)) {
+            $filterRes = $baselineManager->filter($engine->getResults(), $baselinePath);
+            $suppressedCount = count($filterRes['suppressed']);
+            $engine->setResults($filterRes['active']);
+        }
 
         $durationMs = (microtime(true) - $startTime) * 1000;
 
@@ -65,6 +87,12 @@ class AuditCommand extends Command
 
         // ── Format & output ──────────────────────────────────────
         $reportContent = $this->renderReport($engine, $format, $failOn, $durationMs);
+
+        // Notifikasi baseline jika ada temuan yang disembunyikan
+        if ($suppressedCount > 0 && $format !== 'json' && $format !== 'agent') {
+            $this->comment("  [Baseline] {$suppressedCount} temuan lama disembunyikan oleh baseline: " . basename($baselinePath));
+            $this->newLine();
+        }
 
         // Save to file if requested
         if ($outputFile !== null && $reportContent !== null) {
@@ -80,7 +108,11 @@ class AuditCommand extends Command
             return self::FAILURE;
         }
 
-        $this->info('Audit PASSED.');
+        $passMsg = 'Audit PASSED.';
+        if ($suppressedCount > 0) {
+            $passMsg .= " ({$suppressedCount} temuan lama dikecualikan oleh baseline).";
+        }
+        $this->info($passMsg);
         return self::SUCCESS;
     }
 

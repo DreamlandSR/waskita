@@ -159,7 +159,25 @@ php artisan waskita:audit --format=agent
 php artisan waskita:audit --format=agent --output=waskita-report.json
 ```
 
-### 3. `php artisan waskita:headers {url}`
+### 3. `php artisan waskita:baseline` (Legacy CI/CD Baseline)
+
+Mencatat seluruh celah keamanan yang ada saat ini ke dalam file `waskita-baseline.json`. Audit selanjutnya akan mengecualikan temuan baseline tersebut sehingga pipeline CI/CD hanya akan gagal jika ada celah keamanan **baru**:
+
+```bash
+# Buat atau perbarui file waskita-baseline.json
+php artisan waskita:baseline
+
+# Paksa pembaruan baseline tanpa konfirmasi interaktif
+php artisan waskita:baseline --force
+
+# Audit normal (otomatis menyembunyikan temuan lama di baseline)
+php artisan waskita:audit
+
+# Abaikan baseline untuk melihat semua temuan historis secara mentah
+php artisan waskita:audit --no-baseline
+```
+
+### 4. `php artisan waskita:headers {url}`
 
 Memeriksa secara langsung kelengkapan HTTP Security Headers pada aplikasi web yang sedang aktif (staging atau production):
 

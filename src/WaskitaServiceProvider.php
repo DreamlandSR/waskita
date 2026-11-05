@@ -6,6 +6,7 @@ namespace Waskita\Security;
 
 use Illuminate\Support\ServiceProvider;
 use Waskita\Security\Commands\AuditCommand;
+use Waskita\Security\Commands\BaselineCommand;
 use Waskita\Security\Commands\FixCommand;
 use Waskita\Security\Commands\GenerateRulesCommand;
 use Waskita\Security\Commands\HeadersTestCommand;
@@ -59,6 +60,7 @@ class WaskitaServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 AuditCommand::class,
+                BaselineCommand::class,
                 GenerateRulesCommand::class,
                 HeadersTestCommand::class,
                 FixCommand::class,
