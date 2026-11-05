@@ -360,9 +360,7 @@ class ScannersTest extends TestCase
 
         $this->assertSame([], $results, 'Static onclick attribute should not be flagged as XSS.');
 
-        unlink($bladeFile);
-        rmdir($tempDir . '/resources/views');
-        rmdir($tempDir);
+        $this->deleteDirectoryRecursively($tempDir);
     }
 
     public function test_idor_scanner_skips_admin_controllers(): void
@@ -378,14 +376,43 @@ class ScannersTest extends TestCase
 
         $this->assertSame([], $results, 'Admin controller methods should not be flagged as IDOR.');
 
-        unlink($adminController);
-        rmdir($tempDir . '/app/Http/Controllers');
-        rmdir($tempDir);
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_rate_limit_scanner_distinguishes_path_segments(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_ratelimit_' . uniqid();
+        mkdir($tempDir . '/routes', 0777, true);
+
+        // Rute pesan-masuk/balas tidak boleh disalahartikan sebagai login/masuk
+        $routeFile = $tempDir . '/routes/web.php';
+        file_put_contents($routeFile, "<?php\nRoute::post('/admin/pesan-masuk/1/balas', 'PesanController@balas');\n");
+
+        $scanner = new \Waskita\Security\Scanners\RateLimitScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'pesan-masuk route should not match masuk keyword.');
+
+        $this->deleteDirectoryRecursively($tempDir);
     }
 
     // ─────────────────────────────────────────────────────────────
     //  Helpers
     // ─────────────────────────────────────────────────────────────
+
+    private function deleteDirectoryRecursively(string $dir): void
+    {
+        if (! is_dir($dir)) {
+            return;
+        }
+
+        $files = array_diff(scandir($dir) ?: [], ['.', '..']);
+        foreach ($files as $file) {
+            $path = $dir . '/' . $file;
+            is_dir($path) ? $this->deleteDirectoryRecursively($path) : @unlink($path);
+        }
+        @rmdir($dir);
+    }
 
     /**
      * Create a stub scanner that returns pre-configured results.

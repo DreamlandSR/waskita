@@ -10,10 +10,14 @@ use Waskita\Security\Core\ScannerInterface;
 /**
  * IdorScanner - Mendeteksi kerentanan Insecure Direct Object References (IDOR).
  *
+ * Mendukung 2 mode pemindaian:
+ * 1. Live Router Container (Akurat 100%): Membaca mapping aksi controller ke middleware peran aplikasi.
+ * 2. Static File Analysis (Fallback): Analisis sintaksis statis file controller & route.
+ *
  * Pemeriksaan:
- * 1. Controller actions yang menerima model/ID tanpa pengecekan authorization.
+ * 1. Controller actions yang menerima model/ID tanpa pengecekan authorization atau role middleware.
  * 2. Route model binding tanpa middleware 'can:' atau policy.
- * 3. Direct query Model::findOrFail($id) tanpa verifikasi kepemilikan data.
+ * 3. Direct query Model::findOrFail($id) tanpa verifikasi kepemilikan data pada konteks non-admin.
  */
 class IdorScanner implements ScannerInterface
 {
@@ -32,7 +36,7 @@ class IdorScanner implements ScannerInterface
         'reject',
     ];
 
-    /** @var string[] Pattern authorization yang valid */
+    /** @var string[] Pattern authorization yang valid di dalam method body */
     private const AUTH_PATTERNS = [
         'authorize(',
         'Gate::authorize(',
@@ -80,16 +84,42 @@ class IdorScanner implements ScannerInterface
     {
         $results = [];
 
-        // 1. Scan Controller files
-        $controllerFiles = $this->findPhpFiles($basePath . '/app/Http/Controllers');
-        foreach ($controllerFiles as $file) {
-            $results = array_merge($results, $this->scanControllerFile($file, $basePath, $config));
+        // 1. Dapatkan mapping middleware dari live router jika berjalan di dalam container Laravel
+        $actionMiddlewareMap = [];
+        $container = \class_exists(\Illuminate\Container\Container::class) ? \Illuminate\Container\Container::getInstance() : null;
+        $isLive = $container !== null && $container->bound('router');
+
+        if ($isLive) {
+            try {
+                $router = $container->make('router');
+                foreach ($router->getRoutes() as $route) {
+                    $action = $route->getActionName();
+                    if ($action && str_contains($action, '@')) {
+                        $actionMiddlewareMap[$action] = array_unique(array_merge(
+                            $actionMiddlewareMap[$action] ?? [],
+                            $route->gatherMiddleware()
+                        ));
+                    }
+                }
+            } catch (\Throwable) {
+                $isLive = false;
+            }
         }
 
-        // 2. Scan Route files untuk model binding tanpa can: middleware
-        $routeFiles = $this->getRouteFiles($basePath);
-        foreach ($routeFiles as $file) {
-            $results = array_merge($results, $this->scanRouteFile($file, $basePath, $config));
+        // 2. Scan Controller files
+        $controllerFiles = $this->findPhpFiles($basePath . '/app/Http/Controllers');
+        foreach ($controllerFiles as $file) {
+            $results = array_merge($results, $this->scanControllerFile($file, $basePath, $config, $actionMiddlewareMap));
+        }
+
+        // 3. Scan Routes
+        if ($isLive) {
+            $results = array_merge($results, $this->scanLiveRoutes($basePath, $config));
+        } else {
+            $routeFiles = $this->getRouteFiles($basePath);
+            foreach ($routeFiles as $file) {
+                $results = array_merge($results, $this->scanRouteFile($file, $basePath, $config));
+            }
         }
 
         return $results;
@@ -99,9 +129,10 @@ class IdorScanner implements ScannerInterface
      * Scan satu Controller file untuk aksi resource tanpa authorization.
      *
      * @param array<string, mixed> $config
+     * @param array<string, string[]> $actionMiddlewareMap
      * @return AuditResult[]
      */
-    private function scanControllerFile(string $filePath, string $basePath, array $config = []): array
+    private function scanControllerFile(string $filePath, string $basePath, array $config = [], array $actionMiddlewareMap = []): array
     {
         $results = [];
         $content = (string) file_get_contents($filePath);
@@ -110,13 +141,16 @@ class IdorScanner implements ScannerInterface
 
         $adminPatterns = $config['idor']['admin_controllers'] ?? ['*Admin*', '*AdminController', 'App\\Http\\Controllers\\Admin\\*'];
         $publicActions = $config['idor']['public_actions'] ?? ['show', 'download', 'preview', 'index'];
+        $roleMiddlewares = $config['idor']['role_middlewares'] ?? ['admin', 'auth', 'role:*', 'permission:*', 'can:*'];
 
         $isAdminController = $this->matchesPattern($relativePath, $adminPatterns);
 
-        // Jika controller adalah controller admin, aksi resource merupakan hak administratif superuser
+        // Jika controller adalah controller admin berdasarkan nama, seluruh aksi merupakan hak administratif
         if ($isAdminController) {
             return [];
         }
+
+        $fullClassName = $this->extractFullClassName($content);
 
         // Cari semua method public dalam class
         $pattern = '/public\s+function\s+(\w+)\s*\(([^)]*)\)/';
@@ -128,11 +162,19 @@ class IdorScanner implements ScannerInterface
         foreach ($methodMatches[0] as $i => $match) {
             $methodName = $methodMatches[1][$i][0];
             $params = $methodMatches[2][$i][0];
-            $methodOffset = $match[1];
+            $methodOffset = (int) $match[1];
             $methodLine = substr_count(substr($content, 0, $methodOffset), "\n") + 1;
 
             // Jika aksi termasuk aksi publik read-only, abaikan cek kepemilikan
             if (in_array(strtolower($methodName), $publicActions, true)) {
+                continue;
+            }
+
+            // Jika aksi sudah terpasang middleware peran di router (misal: 'admin', 'role:*')
+            $actionKey = $fullClassName . '@' . $methodName;
+            $appliedMiddlewares = $actionMiddlewareMap[$actionKey] ?? [];
+
+            if ($this->hasRoleMiddleware($appliedMiddlewares, $roleMiddlewares)) {
                 continue;
             }
 
@@ -173,10 +215,153 @@ class IdorScanner implements ScannerInterface
             }
         }
 
-        // Cek direct query tanpa scope user (hanya untuk non-admin)
-        $results = array_merge($results, $this->scanDirectObjectQuery($content, $relativePath, $lines));
+        // Cek direct query tanpa scope user (menghindari false positive pada aksi ber-middleware admin)
+        $results = array_merge($results, $this->scanDirectObjectQuery($content, $relativePath, $lines, $fullClassName, $actionMiddlewareMap, $roleMiddlewares));
 
         return $results;
+    }
+
+    /**
+     * Memindai rute langsung dari Laravel Route Collection (Container-aware).
+     *
+     * @param array<string, mixed> $config
+     * @return AuditResult[]
+     */
+    private function scanLiveRoutes(string $basePath, array $config = []): array
+    {
+        $results = [];
+        $container = \Illuminate\Container\Container::getInstance();
+        $router = $container->make('router');
+        $routes = $router->getRoutes();
+
+        $roleMiddlewares = $config['idor']['role_middlewares'] ?? ['admin', 'auth', 'role:*', 'permission:*', 'can:*'];
+        $publicActions = $config['idor']['public_actions'] ?? ['show', 'download', 'preview', 'index'];
+
+        foreach ($routes as $route) {
+            $uri = $route->uri();
+            $params = $route->parameterNames();
+
+            // Hanya audit route yang memiliki parameter dinamis (contoh: /berita/{berita})
+            if (empty($params)) {
+                continue;
+            }
+
+            // Abaikan jika parameter hanya slug atau kategori publik
+            $isOnlySlugOrCategory = true;
+            foreach ($params as $param) {
+                if (! in_array(strtolower($param), ['slug', 'kategori', 'category', 'year', 'month'], true)) {
+                    $isOnlySlugOrCategory = false;
+                    break;
+                }
+            }
+            if ($isOnlySlugOrCategory) {
+                continue;
+            }
+
+            // Jika rute berada di bawah prefix admin/ atau static storage
+            $cleanUri = ltrim($uri, '/');
+            if (str_starts_with($cleanUri, 'admin/') || str_starts_with($cleanUri, 'storage/')) {
+                continue;
+            }
+
+            // Cek middleware yang terpasang pada route
+            $middlewares = $route->gatherMiddleware();
+            if ($this->hasRoleMiddleware($middlewares, $roleMiddlewares)) {
+                continue;
+            }
+
+            // Jika method GET dan merupakan aksi publik read-only
+            $methods = array_map('strtolower', $route->methods());
+            $isGet = in_array('get', $methods, true);
+
+            $action = $route->getActionName();
+            $actionMethod = str_contains($action, '@') ? explode('@', $action)[1] : '';
+
+            if ($isGet && in_array(strtolower($actionMethod), $publicActions, true)) {
+                continue;
+            }
+
+            $results[] = new AuditResult(
+                ruleId: 'IDOR_ROUTE_MISSING_CAN',
+                category: 'idor',
+                severity: AuditResult::SEVERITY_MEDIUM,
+                title: "Route Model Binding Without 'can:' Middleware: /{$uri}",
+                description: "Route '/{$uri}' menggunakan parameter binding tanpa middleware 'can:' atau proteksi peran (role/admin).",
+                file: 'routes/web.php',
+                line: 1,
+                codeSnippet: "Route::" . ($methods[0] ?? 'any') . "('/{$uri}', '{$action}')",
+                suggestion: "Tambahkan ->middleware('can:view,model') atau tempatkan di dalam grup middleware peran yang sesuai.",
+                cveRef: 'CWE-639'
+            );
+        }
+
+        return $results;
+    }
+
+    /**
+     * Cek apakah daftar middleware mengandung middleware peran atau 'can:'.
+     *
+     * @param string[] $appliedMiddlewares
+     * @param string[] $roleMiddlewares
+     */
+    private function hasRoleMiddleware(array $appliedMiddlewares, array $roleMiddlewares): bool
+    {
+        foreach ($appliedMiddlewares as $applied) {
+            if (! is_string($applied)) {
+                continue;
+            }
+
+            $lowerApplied = strtolower($applied);
+
+            if (str_starts_with($lowerApplied, 'can:') || str_starts_with($lowerApplied, 'role:') || str_starts_with($lowerApplied, 'permission:')) {
+                return true;
+            }
+
+            if (in_array($lowerApplied, ['admin', 'auth', 'role', 'permission'], true)) {
+                return true;
+            }
+
+            foreach ($roleMiddlewares as $pattern) {
+                if (fnmatch(strtolower($pattern), $lowerApplied, FNM_CASEFOLD)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Ekstrak namespace dan nama class dari isi file PHP.
+     */
+    private function extractFullClassName(string $content): string
+    {
+        $ns = '';
+        $cls = '';
+
+        if (preg_match('/namespace\s+([^;]+);/', $content, $nsMatch)) {
+            $ns = trim($nsMatch[1]);
+        }
+
+        if (preg_match('/class\s+(\w+)/', $content, $clsMatch)) {
+            $cls = trim($clsMatch[1]);
+        }
+
+        return ($ns && $cls) ? "{$ns}\\{$cls}" : $cls;
+    }
+
+    /**
+     * Dapatkan nama method pembungkus untuk suatu posisi offset di dalam kode.
+     */
+    private function getEnclosingMethodName(string $content, int $offset): ?string
+    {
+        $pattern = '/public\s+function\s+(\w+)\s*\(/';
+        if (preg_match_all($pattern, substr($content, 0, $offset), $matches, PREG_OFFSET_CAPTURE)) {
+            $lastMatch = end($matches[1]);
+            return $lastMatch[0] ?? null;
+        }
+
+        return null;
     }
 
     /**
@@ -286,18 +471,40 @@ class IdorScanner implements ScannerInterface
     /**
      * Scan direct query Model::findOrFail($id) tanpa verifikasi.
      *
+     * @param string[] $lines
+     * @param array<string, string[]> $actionMiddlewareMap
+     * @param string[] $roleMiddlewares
      * @return AuditResult[]
      */
-    private function scanDirectObjectQuery(string $content, string $relativePath, array $lines): array
-    {
+    private function scanDirectObjectQuery(
+        string $content,
+        string $relativePath,
+        array $lines,
+        string $fullClassName = '',
+        array $actionMiddlewareMap = [],
+        array $roleMiddlewares = []
+    ): array {
         $results = [];
 
         $pattern = '/\b([A-Z]\w+)::(findOrFail|find)\s*\(\s*\$(\w*id\w*)\s*\)/i';
 
         if (preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
             foreach ($matches[0] as $i => $match) {
-                $offset = $match[1];
+                $offset = (int) $match[1];
                 $lineNumber = substr_count(substr($content, 0, $offset), "\n") + 1;
+
+                // Cek apakah method pembungkus query ini dilindungi oleh middleware admin/role
+                if ($fullClassName !== '' && ! empty($actionMiddlewareMap)) {
+                    $enclosingMethod = $this->getEnclosingMethodName($content, $offset);
+                    if ($enclosingMethod !== null) {
+                        $actionKey = $fullClassName . '@' . $enclosingMethod;
+                        $appliedMiddlewares = $actionMiddlewareMap[$actionKey] ?? [];
+                        if ($this->hasRoleMiddleware($appliedMiddlewares, $roleMiddlewares)) {
+                            // Query terjadi di dalam method administratif terproteksi
+                            continue;
+                        }
+                    }
+                }
 
                 $contextStart = max(0, $lineNumber - 1);
                 $contextEnd = min(count($lines), $lineNumber + 8);
@@ -328,7 +535,7 @@ class IdorScanner implements ScannerInterface
     }
 
     /**
-     * Scan file route untuk model binding tanpa can: middleware.
+     * Scan file route untuk model binding tanpa can: middleware (Fallback statis).
      *
      * @param array<string, mixed> $config
      * @return AuditResult[]
@@ -340,7 +547,6 @@ class IdorScanner implements ScannerInterface
         $relativePath = $this->getRelativePath($filePath, $basePath);
         $lines = explode("\n", $content);
 
-        // Pola route dengan parameter: Route::get('/posts/{post}', ...)
         $pattern = '/Route::(get|post|put|patch|delete)\s*\(\s*[\'"]([^"\'*]*\{[^}]+\}[^"\'*]*)[\'"](?:\s*,\s*([^;]+))/i';
 
         if (preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
@@ -351,12 +557,10 @@ class IdorScanner implements ScannerInterface
                 $offset = (int) $match[1];
                 $lineNumber = substr_count(substr($content, 0, $offset), "\n") + 1;
 
-                // 1. Parameter slug (contoh: /berita/{slug}) umumnya merupakan konten publik
                 if (str_contains($uri, '{slug}') || str_contains($uri, '{kategori}') || str_contains($uri, '{category}')) {
                     continue;
                 }
 
-                // 2. Cek baris sekitar langsung
                 $contextStart = max(0, $lineNumber - 2);
                 $contextEnd = min(count($lines), $lineNumber + 4);
                 $contextLines = array_slice($lines, $contextStart, $contextEnd - $contextStart);
@@ -371,7 +575,6 @@ class IdorScanner implements ScannerInterface
                     continue;
                 }
 
-                // 3. Cek apakah route berada di dalam enclosing group yang dilindungi role/auth
                 $enclosingGroups = $this->getEnclosingGroups($content, $offset);
                 $isInsideProtectedGroup = false;
                 foreach ($enclosingGroups as $group) {
@@ -385,9 +588,7 @@ class IdorScanner implements ScannerInterface
                     continue;
                 }
 
-                // 4. Jika method GET dan merupakan aksi publik (bukan admin)
                 if ($httpMethod === 'get' && ! str_starts_with(ltrim($uri, '/'), 'admin/')) {
-                    // Akses read-only publik seperti /informasi/{informasi}
                     continue;
                 }
 
@@ -430,7 +631,6 @@ class IdorScanner implements ScannerInterface
                 if ($depth > 0) {
                     $depth--;
                 } else {
-                    // Blok pembuka yang melingkupi offset
                     $stmtStart = max(0, (int) strrpos(substr($content, 0, $i), ';'));
                     $stmt = trim(substr($content, $stmtStart, $i - $stmtStart));
                     if (str_contains($stmt, 'Route::') || str_contains($stmt, 'group(')) {
