@@ -186,20 +186,20 @@ class AuditEngine
 
                 $lineContent = $lines[$idx];
 
-                if (preg_match('/@waskita-ignore(?:\s+([^:\n\r*]+))?/i', $lineContent, $matches)) {
-                    $ignoredParam = isset($matches[1]) ? trim($matches[1]) : '';
+                if (preg_match('/@waskita-ignore\b\s*([^:\n\r*]*)(?::\s*([^\n\r*]+))?/i', $lineContent, $matches)) {
+                    $ruleParams = isset($matches[1]) ? trim($matches[1], " \t\n\r\0\x0B*-{}") : '';
 
-                    if ($ignoredParam === '' || $ignoredParam === '--}}' || $ignoredParam === '*/') {
+                    if ($ruleParams === '' || $ruleParams === '*/') {
                         // Blanket ignore untuk baris ini
                         $isIgnored = true;
                         break;
                     }
 
                     // Cocokkan ruleId, category, atau kata kunci
-                    $tokens = preg_split('/[\s,]+/', $ignoredParam);
+                    $tokens = preg_split('/[\s,]+/', $ruleParams);
                     foreach ($tokens as $token) {
-                        $token = trim($token, " \t\n\r\0\x0B*");
-                        if ($token === '' || $token === '--}}') {
+                        $token = trim($token, " \t\n\r\0\x0B*-{}");
+                        if ($token === '') {
                             continue;
                         }
 

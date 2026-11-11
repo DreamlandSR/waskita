@@ -143,6 +143,32 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | XSS Scanner Allowlist & Safe Patterns
+    |--------------------------------------------------------------------------
+    |
+    | Daftarkan helper/callable atau regex pattern yang menghasilkan output
+    | HTML/SVG aman dalam {!! ... !!} agar tidak ditandai sebagai false positive.
+    |
+    */
+
+    'xss' => [
+        // Method/helper atau class yang diizinkan menggunakan {!! !!}
+        'safe_callables' => [
+            'Icons::get',
+            'svg',
+            'heroicon',
+            'icon',
+            'feather',
+        ],
+
+        // Regex ekspresi yang dianggap aman
+        'safe_patterns' => [
+            // '/Icons::get\(.+?\)/',
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | IDOR & Role Context Configuration
     |--------------------------------------------------------------------------
     |

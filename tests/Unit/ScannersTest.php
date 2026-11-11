@@ -347,6 +347,36 @@ class ScannersTest extends TestCase
         rmdir($tempDir);
     }
 
+    public function test_engine_filters_blade_waskita_ignore_annotation(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_blade_ignore_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        // Case 1: same line specific ignore
+        $file1 = $tempDir . '/resources/views/line1.blade.php';
+        file_put_contents($file1, "<div>\n{!! \$val !!} {{-- @waskita-ignore XSS_RAW_BLADE_ECHO --}}\n</div>\n");
+
+        // Case 2: same line blanket ignore
+        $file2 = $tempDir . '/resources/views/line2.blade.php';
+        file_put_contents($file2, "<div>\n{!! \$val !!} {{-- @waskita-ignore --}}\n</div>\n");
+
+        // Case 3: preceding line with colon reason
+        $file3 = $tempDir . '/resources/views/line3.blade.php';
+        file_put_contents($file3, "<div>\n{{-- @waskita-ignore: alasan SVG aman --}}\n{!! \$val !!}\n</div>\n");
+
+        $finding1 = new AuditResult('XSS_RAW_BLADE_ECHO', 'xss', AuditResult::SEVERITY_MEDIUM, 'XSS', 'D', 'resources/views/line1.blade.php', 2);
+        $finding2 = new AuditResult('XSS_RAW_BLADE_ECHO', 'xss', AuditResult::SEVERITY_MEDIUM, 'XSS', 'D', 'resources/views/line2.blade.php', 2);
+        $finding3 = new AuditResult('XSS_RAW_BLADE_ECHO', 'xss', AuditResult::SEVERITY_MEDIUM, 'XSS', 'D', 'resources/views/line3.blade.php', 3);
+
+        $scanner = $this->createStubScanner('BladeScanner', [$finding1, $finding2, $finding3]);
+        $engine  = new AuditEngine([], [$scanner]);
+        $results = $engine->run($tempDir);
+
+        $this->assertSame([], $results, 'All Blade findings should be ignored by various @waskita-ignore comment formats.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
     public function test_xss_scanner_ignores_static_js_attributes(): void
     {
         $tempDir = sys_get_temp_dir() . '/waskita_xss_' . uniqid();
@@ -451,6 +481,288 @@ class ScannersTest extends TestCase
         $results = $scanner->scan($tempDir);
 
         $this->assertSame([], $results, 'Controller with $this->authorizeResource() should not flag resource methods as IDOR.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_skips_accessor_sanitized_echo(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_acc_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+        mkdir($tempDir . '/app/Models', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/test.blade.php';
+        file_put_contents($bladeFile, '<div>{!! $item->safe_content !!}</div><div>{!! $berita->konten_aman !!}</div>');
+
+        $modelFile = $tempDir . '/app/Models/Item.php';
+        file_put_contents($modelFile, <<<'PHP'
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Item extends Model
+{
+    public function getSafeContentAttribute(): string
+    {
+        return clean($this->attributes['content']);
+    }
+}
+PHP
+        );
+
+        $beritaModel = $tempDir . '/app/Models/Berita.php';
+        file_put_contents($beritaModel, <<<'PHP'
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Berita extends Model
+{
+    public function getKontenAmanAttribute()
+    {
+        return clean($this->attributes['konten']);
+    }
+}
+PHP
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Accessor with sanitization should not be flagged as XSS.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_supports_flat_model_directory(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_flat_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+        mkdir($tempDir . '/app', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/test.blade.php';
+        file_put_contents($bladeFile, '<div>{!! $article->safe_html !!}</div>');
+
+        $modelFile = $tempDir . '/app/Article.php';
+        file_put_contents($modelFile, <<<'PHP'
+<?php
+
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Article extends Model
+{
+    public function getSafeHtmlAttribute()
+    {
+        return clean($this->attributes['html']);
+    }
+}
+PHP
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertSame([], $results, 'Flat model accessor with sanitization should not be flagged.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_flags_accessor_without_sanitization(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_raw_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+        mkdir($tempDir . '/app/Models', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/test.blade.php';
+        file_put_contents($bladeFile, '<div>{!! $item->raw_content !!}</div>');
+
+        $modelFile = $tempDir . '/app/Models/Item.php';
+        file_put_contents($modelFile, <<<'PHP'
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Item extends Model
+{
+    public function getRawContentAttribute(): string
+    {
+        return $this->attributes['content'];
+    }
+}
+PHP
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertCount(1, $results);
+        $this->assertSame('XSS_RAW_BLADE_ECHO', $results[0]->ruleId);
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_no_duplicate_csp_finding(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_csp_' . uniqid();
+        mkdir($tempDir . '/resources/views/layouts', 0777, true);
+
+        $layoutFile = $tempDir . '/resources/views/layouts/app.blade.php';
+        file_put_contents($layoutFile, '<!DOCTYPE html><html><head><title>App</title></head><body><h1>Hello</h1></body></html>');
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $cspFindings = array_filter($results, fn ($r) => $r->ruleId === 'XSS_MISSING_CSP_META');
+        $this->assertEmpty($cspFindings, 'XssScanner should not produce XSS_MISSING_CSP_META findings.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_skips_safe_callables_and_svg_helpers(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_safe_callables_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/icons.blade.php';
+        file_put_contents($bladeFile, <<<'BLADE'
+<div>
+    {!! \App\Support\Icons::get('store') !!}
+    {!! Icons::get('cart') !!}
+    {!! svg('icon-user') !!}
+    {!! heroicon('outline-check') !!}
+    {!! icon('star') !!}
+</div>
+BLADE
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertEmpty($results, 'XssScanner should not flag safe icon/svg helper calls as XSS.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_skips_static_literal_echo(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_static_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/static.blade.php';
+        file_put_contents($bladeFile, <<<'BLADE'
+<div>
+    {!! '<span>Text Statis</span>' !!}
+    {!! "<b>Bold Statis</b>" !!}
+    {!! 12345 !!}
+</div>
+BLADE
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertEmpty($results, 'XssScanner should not flag static literal echos without variables.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_skips_htmlable_and_htmlstring(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_htmlstring_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/htmlable.blade.php';
+        file_put_contents($bladeFile, <<<'BLADE'
+<div>
+    {!! new \Illuminate\Support\HtmlString('<p>Hello</p>') !!}
+    {!! new HtmlString('<b>Bold</b>') !!}
+    {!! $table->toHtml() !!}
+</div>
+BLADE
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertEmpty($results, 'XssScanner should recognize HtmlString and ->toHtml() as safe.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_skips_safe_numeric_formatting(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_format_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/format.blade.php';
+        file_put_contents($bladeFile, <<<'BLADE'
+<div>
+    {!! number_format($price, 0, ',', '.') !!}
+    {!! intval($qty) !!}
+    {!! count($items) !!}
+    {!! date('Y-m-d') !!}
+</div>
+BLADE
+        );
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertEmpty($results, 'XssScanner should not flag safe formatting helpers.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_honors_custom_config_safe_callables_and_patterns(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_custom_config_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/custom.blade.php';
+        file_put_contents($bladeFile, <<<'BLADE'
+<div>
+    {!! CustomRenderer::renderSvg('home') !!}
+    {!! render_badge('active') !!}
+</div>
+BLADE
+        );
+
+        $config = [
+            'xss' => [
+                'safe_callables' => ['CustomRenderer::renderSvg'],
+                'safe_patterns' => ['/render_badge\([^\)]+\)/'],
+            ],
+        ];
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir, $config);
+
+        $this->assertEmpty($results, 'XssScanner should honor custom safe_callables and safe_patterns from config.');
+
+        $this->deleteDirectoryRecursively($tempDir);
+    }
+
+    public function test_xss_scanner_still_flags_unsafe_dynamic_variables(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/waskita_xss_unsafe_' . uniqid();
+        mkdir($tempDir . '/resources/views', 0777, true);
+
+        $bladeFile = $tempDir . '/resources/views/unsafe.blade.php';
+        file_put_contents($bladeFile, '<div>{!! $user->bio !!}</div>');
+
+        $scanner = new \Waskita\Security\Scanners\XssScanner();
+        $results = $scanner->scan($tempDir);
+
+        $this->assertCount(1, $results);
+        $this->assertSame('XSS_RAW_BLADE_ECHO', $results[0]->ruleId);
 
         $this->deleteDirectoryRecursively($tempDir);
     }

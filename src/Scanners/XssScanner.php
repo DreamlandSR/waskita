@@ -14,10 +14,11 @@ use Waskita\Security\Core\ScannerInterface;
  * 1. Unescaped blade echo {!! ... !!} tanpa sanitasi (HTMLPurifier, e(), htmlspecialchars)
  * 2. Unescaped echo dengan user input langsung ($request, $_GET, $_POST, $input)
  * 3. Dangerous JavaScript attribute contexts: href="javascript:", onclick, onload, onerror
- * 4. Rekomendasi CSP (Content-Security-Policy) di layout views
  */
 class XssScanner implements ScannerInterface
 {
+    /** @var array<string, array<string, string>> Cache model files per basePath */
+    private array $modelCache = [];
     /** @var string[] Variabel yang mengandung user input */
     private const USER_INPUT_PATTERNS = [
         '$request->',
@@ -39,6 +40,29 @@ class XssScanner implements ScannerInterface
         'e(',
         'strip_tags(',
         'Str::of(',
+        'new HtmlString(',
+        'HtmlString(',
+        '->toHtml()',
+        'toHtml()',
+        'number_format(',
+        'intval(',
+        'floatval(',
+        'count(',
+        'round(',
+        'ceil(',
+        'floor(',
+        'date(',
+        '->format(',
+    ];
+
+    /** @var string[] Default helper/callable yang aman untuk render SVG/HTML internal */
+    private const DEFAULT_SAFE_CALLABLES = [
+        'Icons::get',
+        'svg',
+        'heroicon',
+        'icon',
+        'feather',
+        'blade-icon',
     ];
 
     /** @var string[] Event handler attributes berbahaya */
@@ -72,11 +96,8 @@ class XssScanner implements ScannerInterface
         // 1. Scan semua Blade templates
         $bladeFiles = $this->findBladeFiles($basePath . '/resources/views');
         foreach ($bladeFiles as $file) {
-            $results = array_merge($results, $this->scanBladeFile($file, $basePath));
+            $results = array_merge($results, $this->scanBladeFile($file, $basePath, $config));
         }
-
-        // 2. Cek CSP di layout views
-        $results = array_merge($results, $this->checkCspInLayouts($bladeFiles, $basePath));
 
         return $results;
     }
@@ -84,9 +105,10 @@ class XssScanner implements ScannerInterface
     /**
      * Scan satu file Blade template untuk XSS vulnerabilities.
      *
+     * @param array<string, mixed> $config
      * @return AuditResult[]
      */
-    private function scanBladeFile(string $filePath, string $basePath): array
+    private function scanBladeFile(string $filePath, string $basePath, array $config = []): array
     {
         $results = [];
         $content = (string) file_get_contents($filePath);
@@ -122,7 +144,12 @@ class XssScanner implements ScannerInterface
                         suggestion: "Gunakan {{ ... }} untuk auto-escaping, atau e(\$var) / Purifier::clean(\$var) untuk sanitasi manual.",
                         cveRef: 'CWE-79'
                     );
-                } elseif (! $isSanitized) {
+                } elseif (
+                    ! $isSanitized
+                    && ! $this->isStaticLiteral($innerContent)
+                    && ! $this->isSafeCallableOrPattern($innerContent, $config)
+                    && ! $this->isAccessorSanitized($innerContent, $basePath)
+                ) {
                     // MEDIUM: unescaped echo tanpa sanitasi (bisa jadi stored XSS)
                     $results[] = new AuditResult(
                         ruleId: 'XSS_RAW_BLADE_ECHO',
@@ -209,51 +236,154 @@ class XssScanner implements ScannerInterface
     }
 
     /**
-     * Cek apakah layout view mengandung Content-Security-Policy.
-     *
-     * @param string[] $bladeFiles
-     * @return AuditResult[]
+     * Cek apakah ekspresi mengakses Eloquent accessor yang melakukan sanitasi.
      */
-    private function checkCspInLayouts(array $bladeFiles, string $basePath): array
+    private function isAccessorSanitized(string $expression, string $basePath): bool
     {
-        $layoutFiles = array_filter($bladeFiles, function (string $file) {
-            $basename = basename($file, '.blade.php');
-            return in_array($basename, ['app', 'master', 'main', 'layout', 'base'], true)
-                || str_contains($file, 'layouts/');
-        });
-
-        // Jika tidak ada layout files, skip
-        if (empty($layoutFiles)) {
-            return [];
+        // Ekstrak property name dari pola seperti $var->property_name atau $var?->property_name
+        if (! preg_match_all('/(?:->|\?->)\s*([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)\b(?!\s*\()/m', $expression, $matches)) {
+            return false;
         }
 
-        $hasCsp = false;
-        foreach ($layoutFiles as $file) {
-            $content = (string) file_get_contents($file);
-            if (preg_match('/content-security-policy/i', $content) ||
-                str_contains($content, 'csp-nonce') ||
-                str_contains($content, '@csp')) {
-                $hasCsp = true;
-                break;
+        $properties = array_unique($matches[1]);
+        if (empty($properties)) {
+            return false;
+        }
+
+        $modelFiles = $this->getModelFiles($basePath);
+        if (empty($modelFiles)) {
+            return false;
+        }
+
+        foreach ($properties as $prop) {
+            // Konversi snake_case / camelCase ke PascalCase
+            $pascal = str_replace(' ', '', ucwords(str_replace(['-', '_'], ' ', $prop)));
+            $accessorName = 'get' . $pascal . 'Attribute';
+            $camel = lcfirst($pascal);
+
+            foreach ($modelFiles as $filePath => $modelContent) {
+                // 1. Cek traditional Eloquent accessor: get{Property}Attribute
+                if (stripos($modelContent, $accessorName) !== false) {
+                    $pattern = '/function\s+' . preg_quote($accessorName, '/') . '\s*\([^)]*\)/i';
+                    if (preg_match($pattern, $modelContent, $fnMatch, PREG_OFFSET_CAPTURE)) {
+                        $offset = (int) $fnMatch[0][1];
+                        $body = $this->extractMethodBody($modelContent, $offset);
+                        if ($body !== null && $this->methodAppliesSanitization($body, $modelContent)) {
+                            return true;
+                        }
+                    }
+                }
+
+                // 2. Cek Laravel 9+ Attribute accessor: function {property}(): Attribute
+                if (stripos($modelContent, $camel) !== false) {
+                    $pattern = '/function\s+' . preg_quote($camel, '/') . '\s*\([^)]*\)\s*:\s*Attribute\b/i';
+                    if (preg_match($pattern, $modelContent, $fnMatch, PREG_OFFSET_CAPTURE)) {
+                        $offset = (int) $fnMatch[0][1];
+                        $body = $this->extractMethodBody($modelContent, $offset);
+                        if ($body !== null && $this->methodAppliesSanitization($body, $modelContent)) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
 
-        if (! $hasCsp) {
-            return [
-                new AuditResult(
-                    ruleId: 'XSS_MISSING_CSP_META',
-                    category: 'xss',
-                    severity: AuditResult::SEVERITY_LOW,
-                    title: 'Missing Content-Security-Policy in Layout Views',
-                    description: "Tidak ditemukan tag meta Content-Security-Policy atau directive @csp di layout view. CSP membantu mencegah eksekusi script yang tidak diotorisasi.",
-                    file: 'resources/views/layouts/',
-                    suggestion: "Tambahkan <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'\"> atau gunakan middleware/package CSP.",
-                    cveRef: 'CWE-1021'
-                ),
-            ];
+        return false;
+    }
+
+    /**
+     * Cek apakah method body atau helper internal yang dipanggilnya melakukan sanitasi.
+     */
+    private function methodAppliesSanitization(string $body, string $modelContent): bool
+    {
+        if ($this->isSanitized($body)) {
+            return true;
         }
 
-        return [];
+        // Cek apakah method mendelegasikan ke internal helper: self::helper(), $this->helper(), static::helper()
+        if (preg_match_all('/(?:self::|\$this->|static::)\s*([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)\s*\(/i', $body, $calls)) {
+            foreach (array_unique($calls[1]) as $helperName) {
+                $pattern = '/function\s+' . preg_quote($helperName, '/') . '\s*\([^)]*\)/i';
+                if (preg_match($pattern, $modelContent, $fnMatch, PREG_OFFSET_CAPTURE)) {
+                    $offset = (int) $fnMatch[0][1];
+                    $helperBody = $this->extractMethodBody($modelContent, $offset);
+                    if ($helperBody !== null && $this->isSanitized($helperBody)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Ambil semua file model PHP beserta kontennya dengan caching.
+     *
+     * @return array<string, string> File path => file content
+     */
+    private function getModelFiles(string $basePath): array
+    {
+        $normalizedPath = rtrim($basePath, '/\\');
+        if (isset($this->modelCache[$normalizedPath])) {
+            return $this->modelCache[$normalizedPath];
+        }
+
+        $models = [];
+
+        // 1. Laravel 8+ style: app/Models/
+        $modelsDir = $normalizedPath . '/app/Models';
+        if (is_dir($modelsDir)) {
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($modelsDir, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($iterator as $file) {
+                if ($file->isFile() && str_ends_with($file->getFilename(), '.php')) {
+                    $models[$file->getPathname()] = (string) file_get_contents($file->getPathname());
+                }
+            }
+        }
+
+        // 2. Flat style: app/*.php
+        $appDir = $normalizedPath . '/app';
+        if (is_dir($appDir)) {
+            $flatFiles = glob($appDir . '/*.php') ?: [];
+            foreach ($flatFiles as $file) {
+                if (is_file($file)) {
+                    $models[$file] = (string) file_get_contents($file);
+                }
+            }
+        }
+
+        $this->modelCache[$normalizedPath] = $models;
+
+        return $this->modelCache[$normalizedPath];
+    }
+
+    /**
+     * Ekstrak body method dari opening brace ke closing brace.
+     */
+    private function extractMethodBody(string $content, int $offset): ?string
+    {
+        $braceStart = strpos($content, '{', $offset);
+        if ($braceStart === false) {
+            return null;
+        }
+
+        $depth = 0;
+        $len = strlen($content);
+        for ($i = $braceStart; $i < $len; $i++) {
+            if ($content[$i] === '{') {
+                $depth++;
+            } elseif ($content[$i] === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return substr($content, $braceStart, $i - $braceStart + 1);
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -279,6 +409,61 @@ class XssScanner implements ScannerInterface
             if (str_contains($expression, $pattern)) {
                 return true;
             }
+        }
+
+        return (bool) preg_match('/(?:Purifier::|\\\\Purifier::)?(?:clean|htmlspecialchars|htmlentities|e|strip_tags)\s*\(|new\s+(?:\\\\?Illuminate\\\\Support\\\\)?HtmlString\s*\(|(?:->|::)toHtml\s*\(/i', $expression);
+    }
+
+    /**
+     * Cek apakah ekspresi merupakan pemanggilan method/helper yang terdaftar aman atau sesuai pattern konfigurasi.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function isSafeCallableOrPattern(string $expression, array $config): bool
+    {
+        $safeCallables = array_merge(
+            self::DEFAULT_SAFE_CALLABLES,
+            $config['xss']['safe_callables'] ?? []
+        );
+
+        $expressionClean = str_replace('\\', '', $expression);
+
+        foreach ($safeCallables as $callable) {
+            $callableClean = str_replace('\\', '', $callable);
+            if (stripos($expressionClean, $callableClean) !== false) {
+                return true;
+            }
+        }
+
+        $safePatterns = $config['xss']['safe_patterns'] ?? [];
+        foreach ($safePatterns as $pattern) {
+            if (@preg_match($pattern, $expression)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Cek apakah ekspresi bernilai statis murni / tanpa variabel dinamis ($).
+     * Ekspresi tanpa variabel dan tanpa user input tidak mungkin dieksploitasi untuk XSS.
+     */
+    private function isStaticLiteral(string $expression): bool
+    {
+        // Jika mengandung pola user input langsung, jangan anggap statis
+        if ($this->containsUserInput($expression)) {
+            return false;
+        }
+
+        // Jika tidak mengandung variabel ($) sama sekali
+        if (! str_contains($expression, '$')) {
+            return true;
+        }
+
+        // Panggilan helper dengan argumen literal murni tanpa variabel
+        if (preg_match('/^[A-Za-z0-9_\\\:]+\(\s*(?:[\'"][^\'"]*[\'"]|\d+|true|false|null)(?:\s*,\s*(?:[\'"][^\'"]*[\'"]|\d+|true|false|null))*\s*\)$/i', trim($expression))) {
+            return true;
         }
 
         return false;
