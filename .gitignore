@@ -2,6 +2,7 @@
 /node_modules/
 .phpunit.result.cache
 .phpunit.cache/
+phpunit.xml
 .env
 composer.lock
 *.log
