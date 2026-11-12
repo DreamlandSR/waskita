@@ -40,6 +40,38 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Strictness Level
+    |--------------------------------------------------------------------------
+    |
+    | Mode ketat audit scanner:
+    | - 'pedantic': Melaporkan semua temuan termasuk INFO/peringatan minor.
+    | - 'actionable' (default): Hanya melaporkan temuan dengan risiko nyata.
+    | - 'minimal': Hanya melaporkan temuan HIGH dan CRITICAL.
+    |
+    */
+
+    'strictness_level' => env('WASKITA_STRICTNESS_LEVEL', 'actionable'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Trusted View Helpers (XSS Whitelist)
+    |--------------------------------------------------------------------------
+    |
+    | Daftar helper/class yang diizinkan untuk di-echo unescaped ({!! ... !!})
+    | tanpa dianggap celah XSS (misal untuk merender static icon SVG).
+    |
+    */
+
+    'trusted_view_helpers' => [
+        'Icons::get',
+        'svg',
+        'heroicon',
+        'icon',
+        'feather',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Enabled Scanners
     |--------------------------------------------------------------------------
     |

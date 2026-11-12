@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Waskita\Security\Scanners;
 
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\LaravelSecurityDictionary;
 use Waskita\Security\Core\ScannerInterface;
 
 /**
@@ -18,24 +19,7 @@ use Waskita\Security\Core\ScannerInterface;
 class MassAssignmentScanner implements ScannerInterface
 {
     /** @var string[] Kolom sensitif yang tidak boleh ada di $fillable */
-    private const SENSITIVE_COLUMNS = [
-        'role',
-        'roles',
-        'is_admin',
-        'admin',
-        'is_superadmin',
-        'superadmin',
-        'password',
-        'remember_token',
-        'email_verified_at',
-        'permissions',
-        'permission',
-        'balance',
-        'credit',
-        'wallet',
-        'verified',
-        'is_verified',
-    ];
+    private const SENSITIVE_COLUMNS = LaravelSecurityDictionary::DEFAULT_SENSITIVE_COLUMNS;
 
     public function getName(): string
     {
@@ -54,7 +38,7 @@ class MassAssignmentScanner implements ScannerInterface
         // 1. Scan Model Eloquent di app/Models dan app/
         $modelFiles = $this->findModelFiles($basePath);
         foreach ($modelFiles as $file) {
-            $results = array_merge($results, $this->scanModelFile($file, $basePath));
+            $results = array_merge($results, $this->scanModelFile($file, $basePath, $config));
         }
 
         // 2. Scan Controller di app/Http/Controllers
@@ -69,9 +53,10 @@ class MassAssignmentScanner implements ScannerInterface
     /**
      * Scan satu file Model Eloquent.
      *
+     * @param array<string, mixed> $config
      * @return AuditResult[]
      */
-    private function scanModelFile(string $filePath, string $basePath): array
+    private function scanModelFile(string $filePath, string $basePath, array $config = []): array
     {
         $results = [];
         $content = (string) file_get_contents($filePath);
@@ -113,7 +98,12 @@ class MassAssignmentScanner implements ScannerInterface
             $startOffset = $matches[0][1];
             $matchStartLine = substr_count(substr($content, 0, $startOffset), "\n") + 1;
 
-            foreach (self::SENSITIVE_COLUMNS as $sensitiveCol) {
+            $sensitiveColumns = array_unique(array_merge(
+                self::SENSITIVE_COLUMNS,
+                $config['sensitive_columns'] ?? []
+            ));
+
+            foreach ($sensitiveColumns as $sensitiveCol) {
                 if (preg_match('/[\'"](' . preg_quote($sensitiveCol, '/') . ')[\'"]/i', $fillableBody, $colMatch, PREG_OFFSET_CAPTURE)) {
                     $colOffsetInFillable = $colMatch[0][1];
                     $totalOffset = $matches[2][1] + $colOffsetInFillable;

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Waskita\Security\Scanners;
 
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\LaravelSecurityDictionary;
 use Waskita\Security\Core\ScannerInterface;
 
 /**
@@ -19,65 +20,18 @@ class XssScanner implements ScannerInterface
 {
     /** @var array<string, array<string, string>> Cache model files per basePath */
     private array $modelCache = [];
+
     /** @var string[] Variabel yang mengandung user input */
-    private const USER_INPUT_PATTERNS = [
-        '$request->',
-        'request()->',
-        'request(',
-        '$_GET',
-        '$_POST',
-        '$_REQUEST',
-        '$input',
-        '$query',
-    ];
+    private const USER_INPUT_PATTERNS = LaravelSecurityDictionary::USER_INPUT_SOURCES;
 
     /** @var string[] Fungsi sanitasi yang aman */
-    private const SANITIZER_PATTERNS = [
-        'Purifier::clean(',
-        'clean(',
-        'htmlspecialchars(',
-        'htmlentities(',
-        'e(',
-        'strip_tags(',
-        'Str::of(',
-        'new HtmlString(',
-        'HtmlString(',
-        '->toHtml()',
-        'toHtml()',
-        'number_format(',
-        'intval(',
-        'floatval(',
-        'count(',
-        'round(',
-        'ceil(',
-        'floor(',
-        'date(',
-        '->format(',
-    ];
+    private const SANITIZER_PATTERNS = LaravelSecurityDictionary::XSS_SANITIZERS;
 
     /** @var string[] Default helper/callable yang aman untuk render SVG/HTML internal */
-    private const DEFAULT_SAFE_CALLABLES = [
-        'Icons::get',
-        'svg',
-        'heroicon',
-        'icon',
-        'feather',
-        'blade-icon',
-    ];
+    private const DEFAULT_SAFE_CALLABLES = LaravelSecurityDictionary::DEFAULT_SAFE_VIEW_HELPERS;
 
     /** @var string[] Event handler attributes berbahaya */
-    private const DANGEROUS_ATTRIBUTES = [
-        'onclick',
-        'onload',
-        'onerror',
-        'onmouseover',
-        'onmouseenter',
-        'onfocus',
-        'onblur',
-        'onsubmit',
-        'onchange',
-        'oninput',
-    ];
+    private const DANGEROUS_ATTRIBUTES = LaravelSecurityDictionary::DANGEROUS_HTML_ATTRIBUTES;
 
     public function getName(): string
     {
@@ -391,13 +345,7 @@ class XssScanner implements ScannerInterface
      */
     private function containsUserInput(string $expression): bool
     {
-        foreach (self::USER_INPUT_PATTERNS as $pattern) {
-            if (str_contains($expression, $pattern)) {
-                return true;
-            }
-        }
-
-        return false;
+        return LaravelSecurityDictionary::containsUserInput($expression);
     }
 
     /**
@@ -405,13 +353,7 @@ class XssScanner implements ScannerInterface
      */
     private function isSanitized(string $expression): bool
     {
-        foreach (self::SANITIZER_PATTERNS as $pattern) {
-            if (str_contains($expression, $pattern)) {
-                return true;
-            }
-        }
-
-        return (bool) preg_match('/(?:Purifier::|\\\\Purifier::)?(?:clean|htmlspecialchars|htmlentities|e|strip_tags)\s*\(|new\s+(?:\\\\?Illuminate\\\\Support\\\\)?HtmlString\s*\(|(?:->|::)toHtml\s*\(/i', $expression);
+        return LaravelSecurityDictionary::isSanitized($expression);
     }
 
     /**
@@ -421,28 +363,7 @@ class XssScanner implements ScannerInterface
      */
     private function isSafeCallableOrPattern(string $expression, array $config): bool
     {
-        $safeCallables = array_merge(
-            self::DEFAULT_SAFE_CALLABLES,
-            $config['xss']['safe_callables'] ?? []
-        );
-
-        $expressionClean = str_replace('\\', '', $expression);
-
-        foreach ($safeCallables as $callable) {
-            $callableClean = str_replace('\\', '', $callable);
-            if (stripos($expressionClean, $callableClean) !== false) {
-                return true;
-            }
-        }
-
-        $safePatterns = $config['xss']['safe_patterns'] ?? [];
-        foreach ($safePatterns as $pattern) {
-            if (@preg_match($pattern, $expression)) {
-                return true;
-            }
-        }
-
-        return false;
+        return LaravelSecurityDictionary::isSafeViewHelper($expression, $config);
     }
 
     /**
@@ -451,22 +372,7 @@ class XssScanner implements ScannerInterface
      */
     private function isStaticLiteral(string $expression): bool
     {
-        // Jika mengandung pola user input langsung, jangan anggap statis
-        if ($this->containsUserInput($expression)) {
-            return false;
-        }
-
-        // Jika tidak mengandung variabel ($) sama sekali
-        if (! str_contains($expression, '$')) {
-            return true;
-        }
-
-        // Panggilan helper dengan argumen literal murni tanpa variabel
-        if (preg_match('/^[A-Za-z0-9_\\\:]+\(\s*(?:[\'"][^\'"]*[\'"]|\d+|true|false|null)(?:\s*,\s*(?:[\'"][^\'"]*[\'"]|\d+|true|false|null))*\s*\)$/i', trim($expression))) {
-            return true;
-        }
-
-        return false;
+        return LaravelSecurityDictionary::isStaticLiteral($expression);
     }
 
     /**

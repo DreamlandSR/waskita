@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Waskita\Security\Scanners;
 
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\LaravelSecurityDictionary;
 use Waskita\Security\Core\ScannerInterface;
 
 /**
@@ -18,19 +19,7 @@ use Waskita\Security\Core\ScannerInterface;
 class SqlInjectionScanner implements ScannerInterface
 {
     /** @var string[] Raw query methods di Eloquent / Query Builder */
-    private const RAW_METHODS = [
-        'DB::raw',
-        'whereRaw',
-        'orWhereRaw',
-        'havingRaw',
-        'orHavingRaw',
-        'orderByRaw',
-        'groupByRaw',
-        'selectRaw',
-        'DB::select',
-        'DB::statement',
-        'DB::unprepared',
-    ];
+    private const RAW_METHODS = LaravelSecurityDictionary::SQL_RAW_SINKS;
 
     public function getName(): string
     {
