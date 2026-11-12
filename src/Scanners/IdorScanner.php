@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Waskita\Security\Scanners;
 
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\ContainerBootstrapper;
+use Waskita\Security\Core\LaravelSecurityDictionary;
 use Waskita\Security\Core\ScannerInterface;
 
 /**
@@ -42,38 +44,7 @@ class IdorScanner implements ScannerInterface
     ];
 
     /** @var string[] Pattern authorization yang valid di dalam method body */
-    private const AUTH_PATTERNS = [
-        'authorize(',
-        'Gate::authorize(',
-        'Gate::allows(',
-        'Gate::denies(',
-        'Gate::check(',
-        'Gate::inspect(',
-        '$this->authorize(',
-        '$this->pastikan',
-        '$this->check',
-        'can(',
-        '->can(',
-        '->cannot(',
-        '->cant(',
-        'auth()->id()',
-        'auth()->user()',
-        'Auth::id()',
-        'Auth::user()',
-        '$request->user()',
-        'user_id',
-        'owner_id',
-        'created_by',
-        'penulis',
-        'Policy',
-        '->forUser(',
-        'abort_if(',
-        'abort_unless(',
-        'abort(403',
-        'abort(401',
-        'abort(Response::HTTP_FORBIDDEN',
-        'abort(Response::HTTP_UNAUTHORIZED',
-    ];
+    private const AUTH_PATTERNS = LaravelSecurityDictionary::AUTHORIZATION_PATTERNS;
 
     public function getName(): string
     {
@@ -89,14 +60,14 @@ class IdorScanner implements ScannerInterface
     {
         $results = [];
 
-        // 1. Dapatkan mapping middleware dari live router jika berjalan di dalam container Laravel
+        // 1. Dapatkan mapping middleware dari live router via ContainerBootstrapper jika Laravel aktif
         $actionMiddlewareMap = [];
-        $container = \class_exists(\Illuminate\Container\Container::class) ? \Illuminate\Container\Container::getInstance() : null;
-        $isLive = $container !== null && $container->bound('router');
+        $bootstrapper = ContainerBootstrapper::detect($basePath);
+        $isLive = $bootstrapper !== null && $bootstrapper->isAvailable() && $bootstrapper->getRouter() !== null;
 
         if ($isLive) {
             try {
-                $router = $container->make('router');
+                $router = $bootstrapper->getRouter();
                 foreach ($router->getRoutes() as $route) {
                     $action = $route->getActionName();
                     if ($action && str_contains($action, '@')) {
@@ -496,12 +467,12 @@ class IdorScanner implements ScannerInterface
     private function scanLiveRoutes(string $basePath, array $config = []): array
     {
         $results = [];
-        $container = \class_exists(\Illuminate\Container\Container::class) ? \Illuminate\Container\Container::getInstance() : null;
-        if ($container === null || ! $container->bound('router')) {
+        $bootstrapper = ContainerBootstrapper::detect($basePath);
+        if ($bootstrapper === null || !$bootstrapper->isAvailable() || $bootstrapper->getRouter() === null) {
             return [];
         }
 
-        $router = $container->make('router');
+        $router = $bootstrapper->getRouter();
         $routes = $router->getRoutes();
 
         $roleMiddlewares = $config['idor']['role_middlewares'] ?? ['admin', 'auth', 'role:*', 'permission:*', 'can:*'];
@@ -752,13 +723,7 @@ class IdorScanner implements ScannerInterface
      */
     private function hasAuthorizationCheck(string $methodBody): bool
     {
-        foreach (self::AUTH_PATTERNS as $pattern) {
-            if (str_contains($methodBody, $pattern)) {
-                return true;
-            }
-        }
-
-        return false;
+        return LaravelSecurityDictionary::hasAuthorizationCheck($methodBody);
     }
 
     /**

@@ -31,6 +31,12 @@ class AuditEngine
     /** @var array<string, mixed> Konfigurasi waskita */
     private array $config;
 
+    private ?AstAnalyzer $astAnalyzer = null;
+
+    private ?ContainerBootstrapper $bootstrapper = null;
+
+    private ?RouteContextResolver $routeContextResolver = null;
+
     /**
      * @param array<string, mixed> $config
      * @param ScannerInterface[]|null $customScanners Jika null, muat 8 default scanner
@@ -84,6 +90,33 @@ class AuditEngine
     }
 
     /**
+     * Dapatkan instance AstAnalyzer bersama untuk analisis statis.
+     */
+    public function getAstAnalyzer(): AstAnalyzer
+    {
+        return $this->astAnalyzer ??= new AstAnalyzer();
+    }
+
+    /**
+     * Dapatkan instance ContainerBootstrapper untuk introspeksi runtime container Laravel.
+     */
+    public function getBootstrapper(string $basePath): ?ContainerBootstrapper
+    {
+        return $this->bootstrapper ??= ContainerBootstrapper::detect($basePath);
+    }
+
+    /**
+     * Dapatkan instance RouteContextResolver untuk inspeksi alur Rute -> Middleware -> Controller.
+     */
+    public function getRouteContextResolver(string $basePath): RouteContextResolver
+    {
+        return $this->routeContextResolver ??= new RouteContextResolver(
+            bootstrapper: $this->getBootstrapper($basePath),
+            astAnalyzer: $this->getAstAnalyzer(),
+        );
+    }
+
+    /**
      * Jalankan audit pada project directory.
      *
      * @param string $basePath Root directory aplikasi Laravel
@@ -130,6 +163,14 @@ class AuditEngine
 
         // Filter temuan yang ditandai dengan anotasi inline @waskita-ignore
         $this->results = $this->filterIgnoredFindings($this->results, $normalizedBasePath);
+
+        // Filter temuan berdasarkan strictness level jika dikonfigurasi
+        if (isset($this->config['strictness_level'])) {
+            $this->results = array_values(array_filter(
+                $this->results,
+                fn (AuditResult $r) => LaravelSecurityDictionary::isAllowedByStrictness($r->severity, $this->config)
+            ));
+        }
 
         return $this->results;
     }

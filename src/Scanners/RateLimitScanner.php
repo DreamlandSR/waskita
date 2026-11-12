@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Waskita\Security\Scanners;
 
 use Waskita\Security\Core\AuditResult;
+use Waskita\Security\Core\ContainerBootstrapper;
+use Waskita\Security\Core\LaravelSecurityDictionary;
 use Waskita\Security\Core\ScannerInterface;
 
 /**
@@ -25,23 +27,7 @@ use Waskita\Security\Core\ScannerInterface;
 class RateLimitScanner implements ScannerInterface
 {
     /** @var array<string, string> Keywords endpoint sensitif beserta kategori risikonya */
-    private const SENSITIVE_KEYWORDS = [
-        'login' => 'Brute Force / Credential Stuffing',
-        'masuk' => 'Brute Force / Credential Stuffing',
-        'register' => 'Spam Account Creation / Flooding',
-        'daftar' => 'Spam Account Creation / Flooding',
-        'password/reset' => 'Password Reset Poisoning / Flooding',
-        'password/email' => 'Email Flooding / Denial of Service',
-        'forgot-password' => 'Email Flooding / Denial of Service',
-        'lupa-kata-sandi' => 'Email Flooding / Denial of Service',
-        'reset-password' => 'Brute Force Token Attack',
-        'kontak' => 'Form Spam / Mail Flooding',
-        'contact' => 'Form Spam / Mail Flooding',
-        'otp' => 'OTP Brute Force Attack',
-        'verify' => 'Verification Token Brute Force',
-        'two-factor' => '2FA Brute Force Attack',
-        '2fa' => '2FA Brute Force Attack',
-    ];
+    private const SENSITIVE_KEYWORDS = LaravelSecurityDictionary::SENSITIVE_ROUTE_KEYWORDS;
 
     public function getName(): string
     {
@@ -55,11 +41,11 @@ class RateLimitScanner implements ScannerInterface
 
     public function scan(string $basePath, array $config = []): array
     {
-        // 1. Prioritaskan Live Router Discovery jika berjalan di dalam container Laravel
-        $container = \class_exists(\Illuminate\Container\Container::class) ? \Illuminate\Container\Container::getInstance() : null;
-        if ($container !== null && $container->bound('router')) {
+        // 1. Prioritaskan Live Router Discovery via ContainerBootstrapper jika Laravel aktif
+        $bootstrapper = ContainerBootstrapper::detect($basePath);
+        if ($bootstrapper !== null && $bootstrapper->isAvailable() && $bootstrapper->getRouter() !== null) {
             try {
-                return $this->scanLiveRoutes($basePath, $config, $container->make('router'));
+                return $this->scanLiveRoutes($basePath, $config, $bootstrapper->getRouter());
             } catch (\Throwable) {
                 // Fallback ke analisis file statis jika live router gagal
             }
@@ -311,9 +297,7 @@ class RateLimitScanner implements ScannerInterface
      */
     private function hasThrottleMiddleware(string $statement): bool
     {
-        return (bool) preg_match('/throttle(?::|\b)/i', $statement)
-            || str_contains($statement, 'RateLimiter')
-            || str_contains($statement, 'RateLimited');
+        return LaravelSecurityDictionary::hasRateLimiting($statement);
     }
 
     /**
